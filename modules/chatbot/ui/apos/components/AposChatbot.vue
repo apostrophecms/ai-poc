@@ -5,7 +5,10 @@
         v-for="(message, index) in messages"
         :key="index"
         class="apos-chatbot__message"
-        :class="{ 'apos-chatbot__message--user': message.fromUser }"
+        :class="{
+          'apos-chatbot__message--user': message.fromUser,
+          'apos-chatbot__message--final': message.final
+        }"
       >
         {{ message.text }}
       </div>
@@ -25,17 +28,45 @@
 export default {
   name: 'AposChatbot',
   data() {
-    console.log('component alive');
     return {
-      messages: [
-        { text: 'Chat with me', fromUser: false }
-      ],
+      messages: [],
       inputText: ''
     };
   },
+  async mounted() {
+    await this.loadHistory();
+  },
   methods: {
-    addMessage(text, fromUser = false) {
-      this.messages.push({ text, fromUser });
+    async loadHistory() {
+      try {
+        const response = await fetch('/api/v1/chatbot/history');
+        if (!response.ok) {
+          if (response.status === 403) {
+            this.messages.push({ text: 'Please log in to chat.', fromUser: false, final: true });
+            return;
+          }
+          throw new Error('Failed to load history');
+        }
+        const data = await response.json();
+        for (const entry of data.entries) {
+          this.messages.push({ text: entry.userMessage, fromUser: true });
+          for (const resp of entry.responses) {
+            this.messages.push({ text: resp.text, fromUser: false, final: resp.final });
+          }
+        }
+        if (this.messages.length === 0) {
+          this.messages.push({ text: 'Chat with me', fromUser: false, final: true });
+        }
+        this.scrollToBottom();
+      } catch (error) {
+        this.messages.push({ text: 'Error loading chat history', fromUser: false, final: true });
+      }
+    },
+    addMessage(text, fromUser = false, final = false) {
+      this.messages.push({ text, fromUser, final });
+      this.scrollToBottom();
+    },
+    scrollToBottom() {
       this.$nextTick(() => {
         const container = this.$refs.messagesContainer;
         if (container) {
@@ -73,16 +104,18 @@ export default {
       const pollInterval = 500;
       const maxAttempts = 60;
       let attempts = 0;
+      let lastIndex = 0;
       while (attempts < maxAttempts) {
         attempts++;
-        const response = await fetch(`/api/v1/chatbot/poll?messageId=${encodeURIComponent(messageId)}`);
+        const response = await fetch(`/api/v1/chatbot/poll?messageId=${encodeURIComponent(messageId)}&lastIndex=${lastIndex}`);
         if (!response.ok) {
           throw new Error('Poll request failed');
         }
         const data = await response.json();
         let receivedFinal = false;
         for (const resp of data.responses) {
-          this.addMessage(resp.text, false);
+          this.addMessage(resp.text, false, resp.final);
+          lastIndex++;
           if (resp.final) {
             receivedFinal = true;
           }
@@ -140,6 +173,10 @@ export default {
   align-self: flex-end;
   background-color: #007bff;
   color: white;
+}
+
+.apos-chatbot__message--final {
+  border-left: 3px solid #28a745;
 }
 
 .apos-chatbot__input-container {

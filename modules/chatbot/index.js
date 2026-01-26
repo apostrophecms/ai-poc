@@ -1,23 +1,24 @@
 export default {
   init(self) {
     self.apiKey = process.env.APOS_ANTHROPIC_API_KEY;
-    // In-memory store for responses keyed by messageId
-    // Each entry: { responses: [...], nextIndex: 0 }
-    self.pending = {};
   },
   apiRoutes(self) {
     return {
       post: {
         async chat(req) {
+          self.requireUser(req);
           const { message, messageId } = req.body;
           if (!messageId) {
             throw self.apos.error('invalid', 'messageId is required');
           }
-          // Initialize response queue for this message
-          self.pending[messageId] = {
+          // Initialize response document in MongoDB
+          await self.db().insertOne({
+            _id: messageId,
+            userId: req.user._id,
+            userMessage: message,
             responses: [],
-            nextIndex: 0
-          };
+            createdAt: new Date()
+          });
           // Simulate async processing with intermediate responses
           self.processMessage(messageId, message);
           return { status: 'processing' };
@@ -25,50 +26,57 @@ export default {
       },
       get: {
         async poll(req) {
-          const { messageId } = req.query;
+          self.requireUser(req);
+          const { messageId, lastIndex } = req.query;
           if (!messageId) {
             throw self.apos.error('invalid', 'messageId is required');
           }
-          const entry = self.pending[messageId];
+          const startIndex = parseInt(lastIndex, 10) || 0;
+          const entry = await self.db().findOne({
+            _id: messageId,
+            userId: req.user._id
+          });
           if (!entry) {
             throw self.apos.error('notfound', 'Unknown messageId');
           }
-          // Return any new responses since last poll
-          const newResponses = entry.responses.slice(entry.nextIndex);
-          entry.nextIndex = entry.responses.length;
-          // Clean up if we've delivered the final response
-          const hasFinal = newResponses.some(r => r.final);
-          if (hasFinal) {
-            delete self.pending[messageId];
-          }
+          // Return responses since lastIndex
+          const newResponses = entry.responses.slice(startIndex);
           return { responses: newResponses };
+        },
+        async history(req) {
+          self.requireUser(req);
+          const entries = await self.db()
+            .find({ userId: req.user._id })
+            .sort({ createdAt: 1 })
+            .toArray();
+          return { entries };
         }
       }
     };
   },
   methods(self) {
     return {
-      async processMessage(messageId, message) {
-        const entry = self.pending[messageId];
-        if (!entry) {
-          return;
+      db() {
+        return self.apos.db.collection('aposChatbotMessages');
+      },
+      requireUser(req) {
+        if (!req.user) {
+          throw self.apos.error('forbidden', 'Login required');
         }
+      },
+      async addResponse(messageId, text, final) {
+        await self.db().updateOne(
+          { _id: messageId },
+          { $push: { responses: { text, final } } }
+        );
+      },
+      async processMessage(messageId, message) {
         // Simulate intermediate response after 1 second
         await self.delay(1000);
-        if (self.pending[messageId]) {
-          entry.responses.push({
-            text: `Processing: "${message}"...`,
-            final: false
-          });
-        }
+        await self.addResponse(messageId, `Processing: "${message}"...`, false);
         // Simulate final response after another 1 second
         await self.delay(1000);
-        if (self.pending[messageId]) {
-          entry.responses.push({
-            text: `You said: ${message}`,
-            final: true
-          });
-        }
+        await self.addResponse(messageId, `You said: ${message}`, true);
       },
       delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));

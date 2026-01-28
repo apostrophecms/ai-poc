@@ -23,13 +23,14 @@ export default {
       post: {
         async chat(req) {
           self.requireUser(req);
-          const { message, messageId } = req.body;
-          if (!messageId) {
-            throw self.apos.error('invalid', 'messageId is required');
+          const { message, messageId, chatId } = req.body;
+          if (!messageId || !chatId) {
+            throw self.apos.error('invalid', 'messageId and chatId are required');
           }
-          // Initialize response document in MongoDB
+          // Create document for this message exchange
           await self.db().insertOne({
-            _id: messageId,
+            messageId,
+            chatId,
             userId: req.user._id,
             userMessage: message,
             responses: [],
@@ -38,7 +39,7 @@ export default {
             createdAt: new Date()
           });
           // Process asynchronously
-          self.processMessage(messageId, message, req.user._id);
+          self.processMessage(messageId, chatId, message, req.user._id);
           return { status: 'processing' };
         },
         async actionResult(req) {
@@ -48,7 +49,7 @@ export default {
             throw self.apos.error('invalid', 'messageId is required');
           }
           await self.db().updateOne(
-            { _id: messageId, userId: req.user._id },
+            { messageId, userId: req.user._id },
             {
               $set: {
                 actionResult: result,
@@ -68,7 +69,7 @@ export default {
           }
           const startIndex = parseInt(lastIndex, 10) || 0;
           const entry = await self.db().findOne({
-            _id: messageId,
+            messageId,
             userId: req.user._id
           });
           if (!entry) {
@@ -83,8 +84,12 @@ export default {
         },
         async history(req) {
           self.requireUser(req);
+          const { chatId } = req.query;
+          if (!chatId) {
+            throw self.apos.error('invalid', 'chatId is required');
+          }
           const entries = await self.db()
-            .find({ userId: req.user._id })
+            .find({ userId: req.user._id, chatId })
             .sort({ createdAt: 1 })
             .toArray();
           return { entries };
@@ -104,13 +109,37 @@ export default {
       },
       async addResponse(messageId, text, final) {
         await self.db().updateOne(
-          { _id: messageId },
+          { messageId },
           { $push: { responses: { text, final } } }
         );
       },
-      async processMessage(messageId, message, userId) {
+      async buildConversationHistory(chatId, currentMessageId) {
+        // Get previous messages in this chat, excluding the current one
+        const entries = await self.db()
+          .find({
+            chatId,
+            messageId: { $ne: currentMessageId }
+          })
+          .sort({ createdAt: 1 })
+          .toArray();
+
+        const messages = [];
+        for (const entry of entries) {
+          // Add user message
+          messages.push({ role: 'user', content: entry.userMessage });
+
+          // Add assistant's final response (skip intermediate "Processing..." messages)
+          const finalResponse = entry.responses.find(r => r.final);
+          if (finalResponse) {
+            messages.push({ role: 'assistant', content: finalResponse.text });
+          }
+        }
+
+        return messages;
+      },
+      async processMessage(messageId, chatId, message, userId) {
         try {
-          const messages = await self.buildConversationHistory(userId, messageId);
+          const messages = await self.buildConversationHistory(chatId, messageId);
           messages.push({ role: 'user', content: message });
           let response = await self.callClaude(messages);
 
@@ -181,7 +210,7 @@ export default {
       async executeSearchArticles(messageId, query) {
         // Set pending action for browser to execute
         await self.db().updateOne(
-          { _id: messageId },
+          { messageId },
           {
             $set: {
               pendingAction: {
@@ -202,7 +231,7 @@ export default {
         const pollInterval = 200;
 
         while (Date.now() - startTime < timeoutMs) {
-          const entry = await self.db().findOne({ _id: messageId });
+          const entry = await self.db().findOne({ messageId });
           if (entry && entry.actionResult !== null) {
             return entry.actionResult;
           }

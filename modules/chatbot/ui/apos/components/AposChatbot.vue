@@ -30,16 +30,18 @@ export default {
   data() {
     return {
       messages: [],
-      inputText: ''
+      inputText: '',
+      chatId: null
     };
   },
   async mounted() {
+    this.chatId = this.generateId();
     await this.loadHistory();
   },
   methods: {
     async loadHistory() {
       try {
-        const response = await fetch('/api/v1/chatbot/history');
+        const response = await fetch(`/api/v1/chatbot/history?chatId=${encodeURIComponent(this.chatId)}`);
         if (!response.ok) {
           if (response.status === 403) {
             this.messages.push({ text: 'Please log in to chat.', fromUser: false, final: true });
@@ -92,7 +94,7 @@ export default {
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ message: text, messageId })
+          body: JSON.stringify({ message: text, messageId, chatId: this.chatId })
         });
         // Poll for responses
         await this.pollForResponses(messageId);
@@ -159,13 +161,11 @@ export default {
         throw new Error(`Search failed: ${response.status}`);
       }
       const data = await response.json();
+      console.log(data);
       // Return simplified results for Claude
       return {
         total: data.results.length,
-        articles: data.results.map(article => ({
-          title: article.title,
-          _id: article._id
-        }))
+        articles: data.results
       };
     },
     delay(ms) {

@@ -117,6 +117,7 @@ export default {
 
         // Handle pending action from server
         if (data.pendingAction) {
+          console.log('[chatbot-browser] Received pending action:', data.pendingAction);
           await this.executeAction(messageId, data.pendingAction);
         }
 
@@ -136,17 +137,20 @@ export default {
       this.addMessage('Error: Response timed out', false);
     },
     async executeAction(messageId, action) {
+      console.log('[chatbot-browser] Executing action:', action.type);
       let result;
       try {
-        if (action.type === 'search_articles') {
-          result = await this.searchArticles(action.query);
+        if (action.type === 'search') {
+          result = await this.search(action.query, action.contentType, action.isPage);
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
       } catch (error) {
+        console.error('[chatbot-browser] Action error:', error);
         result = { error: error.message };
       }
 
+      console.log('[chatbot-browser] Sending result back to server:', result);
       // Send result back to server
       await fetch('/api/v1/chatbot/action-result', {
         method: 'POST',
@@ -154,18 +158,30 @@ export default {
         body: JSON.stringify({ messageId, result })
       });
     },
-    async searchArticles(query) {
-      // Use ApostropheCMS REST API to search for articles
-      const response = await fetch(`/api/v1/article?search=${encodeURIComponent(query)}`);
+    async search(query, contentType, isPage) {
+      if (!contentType) {
+        throw new Error('Content type is required for search');
+      }
+
+      let url;
+      if (isPage) {
+        // Search pages via @apostrophecms/page
+        url = `/api/v1/@apostrophecms/page?search=${encodeURIComponent(query)}`;
+      } else {
+        // Search specific piece type
+        url = `/api/v1/${contentType}?search=${encodeURIComponent(query)}`;
+      }
+
+      console.log('[chatbot-browser] Fetching:', url);
+      const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`Search failed: ${response.status}`);
       }
       const data = await response.json();
-      console.log(data);
-      // Return simplified results for Claude
+      console.log('[chatbot-browser] Search results:', data);
       return {
         total: data.results.length,
-        articles: data.results
+        results: data.results
       };
     },
     delay(ms) {
@@ -207,6 +223,8 @@ export default {
   word-wrap: break-word;
   align-self: flex-start;
   background-color: #f1f1f1;
+  user-select: text;
+  -webkit-user-select: text;
   color: black;
 }
 

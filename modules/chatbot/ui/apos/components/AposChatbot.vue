@@ -102,7 +102,7 @@ export default {
     },
     async pollForResponses(messageId) {
       const pollInterval = 500;
-      const maxAttempts = 60;
+      const maxAttempts = 120;
       let attempts = 0;
       let lastIndex = 0;
       while (attempts < maxAttempts) {
@@ -112,6 +112,12 @@ export default {
           throw new Error('Poll request failed');
         }
         const data = await response.json();
+
+        // Handle pending action from server
+        if (data.pendingAction) {
+          await this.executeAction(messageId, data.pendingAction);
+        }
+
         let receivedFinal = false;
         for (const resp of data.responses) {
           this.addMessage(resp.text, false, resp.final);
@@ -126,6 +132,41 @@ export default {
         await this.delay(pollInterval);
       }
       this.addMessage('Error: Response timed out', false);
+    },
+    async executeAction(messageId, action) {
+      let result;
+      try {
+        if (action.type === 'search_articles') {
+          result = await this.searchArticles(action.query);
+        } else {
+          result = { error: `Unknown action type: ${action.type}` };
+        }
+      } catch (error) {
+        result = { error: error.message };
+      }
+
+      // Send result back to server
+      await fetch('/api/v1/chatbot/action-result', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId, result })
+      });
+    },
+    async searchArticles(query) {
+      // Use ApostropheCMS REST API to search for articles
+      const response = await fetch(`/api/v1/article?search=${encodeURIComponent(query)}`);
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.status}`);
+      }
+      const data = await response.json();
+      // Return simplified results for Claude
+      return {
+        total: data.results.length,
+        articles: data.results.map(article => ({
+          title: article.title,
+          _id: article._id
+        }))
+      };
     },
     delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));

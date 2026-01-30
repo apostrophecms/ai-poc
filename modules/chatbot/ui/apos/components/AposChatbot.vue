@@ -1,5 +1,5 @@
 <template>
-  <div class="apos-chatbot">
+  <div v-if="visible" class="apos-chatbot">
     <div class="apos-chatbot__messages" ref="messagesContainer">
       <div
         v-for="(message, index) in messages"
@@ -10,7 +10,8 @@
           'apos-chatbot__message--final': message.final
         }"
       >
-        {{ message.text }}
+        <template v-if="message.fromUser">{{ message.text }}</template>
+        <div v-else v-html="renderMarkdown(message.text)" class="apos-chatbot__markdown"></div>
       </div>
     </div>
     <div class="apos-chatbot__input-container">
@@ -25,10 +26,13 @@
 </template>
 
 <script>
+import { marked } from 'marked';
+
 export default {
   name: 'AposChatbot',
   data() {
     return {
+      visible: false,
       messages: [],
       inputText: '',
       chatId: null
@@ -36,9 +40,20 @@ export default {
   },
   async mounted() {
     this.chatId = this.generateId();
-    await this.loadHistory();
+    apos.bus.$on('admin-menu-click', this.onAdminMenuClick);
+  },
+  beforeUnmount() {
+    apos.bus.$off('admin-menu-click', this.onAdminMenuClick);
   },
   methods: {
+    onAdminMenuClick(name) {
+      if (name === 'chatbot:toggle') {
+        this.visible = !this.visible;
+        if (this.visible && this.messages.length === 0) {
+          this.loadHistory();
+        }
+      }
+    },
     async loadHistory() {
       try {
         const response = await fetch(`/api/v1/chatbot/history?chatId=${encodeURIComponent(this.chatId)}`);
@@ -176,6 +191,9 @@ export default {
     },
     delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    },
+    renderMarkdown(text) {
+      return marked(text || '');
     }
   }
 };
@@ -189,8 +207,8 @@ export default {
   bottom: 20px;
   right: 20px;
   border: 2px solid gray;
-  width: 300px;
-  height: 400px;
+  width: 450px;
+  height: 600px;
   background-color: white;
   border-radius: 8px;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
@@ -242,5 +260,54 @@ export default {
   padding: 8px;
   font-family: sans-serif;
   box-sizing: border-box;
+}
+
+.apos-chatbot__markdown {
+  line-height: 1.5;
+}
+
+.apos-chatbot__markdown :deep(p) {
+  margin: 0 0 0.5em 0;
+}
+
+.apos-chatbot__markdown :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.apos-chatbot__markdown :deep(ul),
+.apos-chatbot__markdown :deep(ol) {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.apos-chatbot__markdown :deep(code) {
+  background-color: rgba(0, 0, 0, 0.1);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.apos-chatbot__markdown :deep(pre) {
+  background-color: rgba(0, 0, 0, 0.1);
+  padding: 0.5em;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.apos-chatbot__markdown :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+
+.apos-chatbot__markdown :deep(a) {
+  color: #0066cc;
+}
+
+.apos-chatbot__markdown :deep(h1),
+.apos-chatbot__markdown :deep(h2),
+.apos-chatbot__markdown :deep(h3) {
+  margin: 0.5em 0 0.25em 0;
+  font-size: 1.1em;
 }
 </style>

@@ -1,6 +1,23 @@
 export default {
+  icons: {
+    'robot-icon': 'Robot'
+  },
   init(self) {
     self.apiKey = process.env.APOS_ANTHROPIC_API_KEY;
+    self.apos.adminBar.add(
+      'chatbot:toggle',
+      'AI',
+      null,
+      {
+        contextUtility: true,
+        toggle: true,
+        icon: 'robot-icon',
+        tooltip: {
+          activate: 'Open AI Chat',
+          deactivate: 'Close AI Chat'
+        }
+      }
+    );
   },
   handlers(self) {
     return {

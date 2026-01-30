@@ -132,6 +132,41 @@ IMPORTANT: You MUST use this tool whenever you need to create a new _id.
               }
             },
             {
+              name: 'add-widget',
+              description: `Add a new widget to an area in a document.
+
+Use this instead of update when you want to ADD a widget to an area without disturbing existing widgets.
+This safely inserts the widget while preserving all existing content.
+Works with nested areas (e.g., areas inside layout widget columns) by finding the area by its _id.
+
+IMPORTANT:
+- Use generate-id first to get the _id for the new widget
+- The widget must include _id, type, and metaType: "widget"
+- position can be a number (0 = first) or "end" to append`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  docId: {
+                    type: 'string',
+                    description: 'The _id of the document containing the area'
+                  },
+                  areaId: {
+                    type: 'string',
+                    description: 'The _id of the area to add the widget to (found in the document structure)'
+                  },
+                  widget: {
+                    type: 'object',
+                    description: 'The complete widget object including _id, type, metaType, and all content fields'
+                  },
+                  position: {
+                    type: ['number', 'string'],
+                    description: 'Where to insert: a number (0 = first) or "end" to append. Defaults to "end".'
+                  }
+                },
+                required: ['docId', 'areaId', 'widget']
+              }
+            },
+            {
               name: 'get-context',
               description: `Get the current "context document" - the page or piece the user is currently viewing or editing.
 
@@ -429,28 +464,53 @@ MAKING UPDATES:
 - NEVER send back an entire document - only the fields that need to change.
 - Keep your update payloads as small as possible to avoid truncation.
 
-UPDATING WIDGETS (IMPORTANT):
-- To update a specific widget, use an "@ reference" with the widget's _id.
+UPDATING EXISTING WIDGETS:
+- To update a specific widget, use the update tool with an "@ reference" and the widget's _id.
 - Format: { "@widgetIdHere": { ...all widget properties... } }
+- Avoid using the @ syntax twice in a single request. Break that up over multiple requests.
 - You MUST include ALL properties of the widget, including _id, type, and metaType.
-- The @ reference targets the widget but you must send the complete widget object.
 - Example: { "@abc123": { "_id": "abc123", "type": "@apostrophecms/rich-text", "metaType": "widget", "content": "<p>New text</p>" } }
 - NEVER omit _id, type, or metaType - the widget will break without them.
-- NEVER replace an entire area array - always use @ references to update specific widgets.
+
+ADDING NEW WIDGETS TO AN AREA:
+- Use the add-widget tool, NOT the update tool.
+- add-widget safely inserts a new widget without disturbing existing widgets.
+
+REQUIRED STEPS BEFORE ADDING A WIDGET:
+1. FIRST call widget-schema to get the exact schema for the widget type you want to add.
+2. If adding nested widgets (e.g., widgets inside a layout's columns), check widget-schema for EACH nested widget type too.
+3. THEN call generate-id for the main widget AND for each nested widget - every widget needs its own unique _id.
+4. Construct the widget using ONLY properties from the schema - NEVER guess or invent properties.
+5. The widget must include _id, type, and metaType: "widget" plus schema-defined fields.
+- NEVER use update to add widgets - it risks destroying existing content.
+- NEVER skip schema checks - you MUST know the exact field names before constructing ANY widget.
 
 CREATING NEW WIDGETS OR OTHER OBJECTS:
 - When creating a new widget or anything else that requires its own _id, you MUST call the generate-id tool first.
 - NEVER make up or guess _id values - always use generate-id.
 - Each new widget needs: _id (from generate-id), metaType: "widget", and type (the widget type name).
 
+RELATIONSHIP FIELDS:
+- To update a relationship field, pass an array of related documents to the relationship field name (e.g., _images, not imageIds).
+- You cannot patch imageIds or similar ID arrays directly - use the relationship field name with underscore prefix.
+- To save space, only include _id, type, and aposDocId for each related document.
+- If the relationship has custom fields, include a _fields object with those values.
+- Example: { "_images": [{ "_id": "abc", "type": "@apostrophecms/image", "aposDocId": "xyz" }] }
+
 You have full permission to search, read schemas, and update content. Use your tools.`;
+
+        console.log(`>>> INPUT IS: ${JSON.stringify(messages, null, 2)}`);
 
         const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': self.apiKey,
-            'anthropic-version': '2023-06-01'
+            'anthropic-version': '2023-06-01',
+            // To cope with the size of schemas and documents.
+            // Keep working on more and better pruning that doesn't
+            // risk content loss in the process! -Tom
+            'anthropic-beta': 'context-1m-2025-08-07'
           },
           body: JSON.stringify({
             model: 'claude-sonnet-4-5-20250929',
@@ -489,6 +549,10 @@ You have full permission to search, read schemas, and update content. Use your t
 
         if (name === 'generate-id') {
           return { _id: self.apos.util.generateId() };
+        }
+
+        if (name === 'add-widget') {
+          return self.executeAddWidget(messageId, input.docId, input.areaId, input.widget, input.position);
         }
 
         if (name === 'get-context') {
@@ -542,6 +606,44 @@ You have full permission to search, read schemas, and update content. Use your t
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
         return result;
       },
+      async executeAddWidget(messageId, docId, areaId, widget, position) {
+        console.log('[chatbot] executeAddWidget:', { messageId, docId, areaId, widget, position });
+
+        // Look up the document to get its type
+        const doc = await self.apos.doc.db.findOne({ _id: docId });
+        if (!doc) {
+          return { error: `Document not found: ${docId}` };
+        }
+
+        // Set pending action for browser to execute
+
+        const pendingAction = {
+          type: 'add-widget',
+          docId,
+          docType: doc.type,
+          areaId,
+          widget,
+          position: position ?? 'end'
+        };
+
+        console.log('### ADD WIDGET:', JSON.stringify(pendingAction, null, 2));
+
+        await self.db().updateOne(
+          { messageId },
+          {
+            $set: {
+              pendingAction,
+              actionResult: null
+            }
+          }
+        );
+
+        // Wait for browser to execute and return result
+        console.log('[chatbot] Waiting for browser action result...');
+        const result = await self.waitForActionResult(messageId);
+        console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
+        return result;
+      },
       async executeUpdate(messageId, _id, updates) {
         console.log('[chatbot] executeUpdate:', { messageId, _id, updates });
 
@@ -561,6 +663,8 @@ You have full permission to search, read schemas, and update content. Use your t
         if (protectedTypes.includes(doc.type)) {
           return { error: `Cannot modify ${doc.type} documents for security reasons` };
         }
+
+        console.log('### UPDATES:', JSON.stringify(updates, null, 2));
 
         // Set pending action for browser to execute via REST API
         await self.db().updateOne(
@@ -584,6 +688,35 @@ You have full permission to search, read schemas, and update content. Use your t
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
         return result;
       },
+      // Prune schema to reduce token usage
+      pruneSchemaForAI(schema) {
+        if (!schema || !Array.isArray(schema)) {
+          return schema;
+        }
+        return schema.map(field => {
+          const pruned = { ...field };
+          // Remove redundant/unnecessary properties
+          delete pruned.moduleName;
+          delete pruned.aposPath;
+          delete pruned._id;
+          delete pruned.group;
+          delete pruned.label;
+          delete pruned.fields;
+          // Prune labels from choices in select fields
+          if (pruned.choices && Array.isArray(pruned.choices)) {
+            pruned.choices = pruned.choices.map(choice => {
+              const prunedChoice = { ...choice };
+              delete prunedChoice.label;
+              return prunedChoice;
+            });
+          }
+          // Recursively prune nested schemas (e.g., in array or object fields)
+          if (pruned.schema) {
+            pruned.schema = self.pruneSchemaForAI(pruned.schema);
+          }
+          return pruned;
+        });
+      },
       executeDocSchema(typeName) {
         console.log('[chatbot] executeDocSchema:', { typeName });
 
@@ -604,7 +737,7 @@ You have full permission to search, read schemas, and update content. Use your t
         if (docManager && docManager.schema) {
           return {
             typeName,
-            schema: docManager.schema
+            schema: self.pruneSchemaForAI(docManager.schema)
           };
         }
 
@@ -629,7 +762,7 @@ You have full permission to search, read schemas, and update content. Use your t
         if (widgetManager && widgetManager.schema) {
           return {
             typeName,
-            schema: widgetManager.schema
+            schema: self.pruneSchemaForAI(widgetManager.schema)
           };
         }
 

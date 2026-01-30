@@ -161,6 +161,8 @@ export default {
           result = await this.update(action._id, action.docType, action.updates);
         } else if (action.type === 'get-context') {
           result = await this.getContext();
+        } else if (action.type === 'add-widget') {
+          result = await this.addWidget(action.docId, action.docType, action.areaId, action.widget, action.position);
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
@@ -232,6 +234,92 @@ export default {
         total: data.results.length,
         results: data.results
       };
+    },
+    async addWidget(docId, docType, areaId, widget, position) {
+      const url = `/api/v1/${docType}/${docId}?aposMode=draft`;
+
+      // First GET the current document
+      console.log('[chatbot-browser] Fetching document for add-widget:', url);
+      const getResponse = await fetch(url);
+      if (!getResponse.ok) {
+        throw new Error(`Failed to fetch document: ${getResponse.status}`);
+      }
+      const currentDoc = await getResponse.json();
+
+      // Find the area by _id using recursive descent
+      const area = this.findAreaById(currentDoc, areaId);
+      if (!area) {
+        throw new Error(`Area not found: ${areaId}`);
+      }
+
+      // Insert the widget at the specified position
+      const items = area.items || [];
+      if (position === 'end' || position >= items.length) {
+        items.push(widget);
+      } else {
+        items.splice(position, 0, widget);
+      }
+      area.items = items;
+
+      // PATCH with the entire document (area was modified in place)
+      // Use @ reference to target the area by its _id
+      const patch = {
+        [`@${areaId}`]: area
+      };
+
+      console.log('[chatbot-browser] Patching with new widget:', url);
+      const patchResponse = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      if (!patchResponse.ok) {
+        const errorText = await patchResponse.text();
+        throw new Error(`Failed to add widget: ${patchResponse.status} ${errorText}`);
+      }
+      const updatedDoc = await patchResponse.json();
+      console.log('[chatbot-browser] Widget added successfully');
+
+      // Emit event so Apostrophe UI reflects the change
+      apos.bus.$emit('content-changed', {
+        doc: updatedDoc,
+        action: 'update'
+      });
+
+      return {
+        success: true,
+        _id: updatedDoc._id,
+        title: updatedDoc.title,
+        widgetId: widget._id
+      };
+    },
+    // Recursively find an area by its _id
+    findAreaById(obj, areaId) {
+      if (!obj || typeof obj !== 'object') {
+        return null;
+      }
+      // Check if this object is the area we're looking for
+      if (obj._id === areaId && obj.metaType === 'area') {
+        return obj;
+      }
+      // Recurse into all properties
+      for (const key of Object.keys(obj)) {
+        const value = obj[key];
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            const found = this.findAreaById(item, areaId);
+            if (found) {
+              return found;
+            }
+          }
+        } else if (value && typeof value === 'object') {
+          const found = this.findAreaById(value, areaId);
+          if (found) {
+            return found;
+          }
+        }
+      }
+      return null;
     },
     async update(_id, docType, updates) {
       const url = `/api/v1/${docType}/${_id}?aposMode=draft`;

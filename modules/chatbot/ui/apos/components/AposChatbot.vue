@@ -141,7 +141,7 @@ export default {
       let result;
       try {
         if (action.type === 'search') {
-          result = await this.search(action.query, action.contentType, action.isPage);
+          result = await this.search(action.query);
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
@@ -158,19 +158,9 @@ export default {
         body: JSON.stringify({ messageId, result })
       });
     },
-    async search(query, contentType, isPage) {
-      if (!contentType) {
-        throw new Error('Content type is required for search');
-      }
-
-      let url;
-      if (isPage) {
-        // Search pages via @apostrophecms/page
-        url = `/api/v1/@apostrophecms/page?search=${encodeURIComponent(query)}`;
-      } else {
-        // Search specific piece type
-        url = `/api/v1/${contentType}?search=${encodeURIComponent(query)}`;
-      }
+    async search(query) {
+      // Use polymorphic search API that searches all content types
+      const url = `/api/v1/chatbot/search?q=${encodeURIComponent(query)}`;
 
       console.log('[chatbot-browser] Fetching:', url);
       const response = await fetch(url);

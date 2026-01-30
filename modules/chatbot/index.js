@@ -6,40 +6,25 @@ export default {
     return {
       'apostrophe:ready': {
         buildTools() {
-          // Build content type info from doc managers
-          self.contentTypes = self.getContentTypes();
-          console.log('[chatbot] Content types found:', self.contentTypes.map(t => t.name));
-          const typeList = self.contentTypes
-            .map(t => `- ${t.name}: ${t.label}${t.isPage ? ' (page)' : ''}`)
-            .join('\n');
-
           self.tools = [
             {
               name: 'search',
-              description: `Search for content in the CMS using keyword-based search (not semantic/vector search, so exact word matches matter).
+              description: `Search for content across the entire CMS using keyword-based search (not semantic/vector search, so exact word matches matter).
 
-Available content types:
-${typeList}
+This searches all content types (articles, pages, images, etc.) and returns results ordered by relevance.
 
 IMPORTANT:
-- You MUST specify a content type. There is no global search.
-- If unsure which type, try likely ones based on context (e.g., "article" for news/blog content, pages for general content).
 - If a search returns no results, try synonyms or alternative phrasings (e.g., "cats" → "cat", "feline", "kitten").
-- Try the user's exact words first, then fall back to alternatives.
-- You can call search multiple times with different types or keywords.`,
+- Try the user's exact words first, then fall back to alternatives.`,
               input_schema: {
                 type: 'object',
                 properties: {
                   query: {
                     type: 'string',
                     description: 'The search query - use specific keywords. Try the user\'s exact words first.'
-                  },
-                  type: {
-                    type: 'string',
-                    description: 'The content type to search (e.g., "article", "@apostrophecms/image", "default-page"). Required.'
                   }
                 },
-                required: ['query', 'type']
+                required: ['query']
               }
             }
           ];
@@ -94,6 +79,70 @@ IMPORTANT:
         }
       },
       get: {
+        // Polymorphic search API - searches all types, returns properly
+        // hydrated documents with relationships and URLs
+        async search(req) {
+          self.requireUser(req);
+          const q = self.apos.launder.string(req.query.q);
+          const limit = self.apos.launder.integer(req.query.limit, 10, 1, 100);
+
+          if (!q) {
+            return { results: [] };
+          }
+
+          // Initial query across all searchable types
+          const query = self.apos.doc
+            .find(req)
+            .search(q)
+            .limit(limit);
+
+          // Polymorphic find: fetch just the ids at first, then go back
+          // and fetch them via their own type managers so that we get the
+          // expected relationships and urls and suchlike.
+          const idsAndTypes = await query.project({
+            _id: 1,
+            type: 1
+          }).toArray();
+
+          const byType = {};
+          for (const doc of idsAndTypes) {
+            if (!byType[doc.type]) {
+              byType[doc.type] = [];
+            }
+            byType[doc.type].push(doc._id);
+          }
+
+          let docs = [];
+
+          for (const type in byType) {
+            const manager = self.apos.doc.getManager(type);
+            if (!manager) {
+              continue;
+            }
+            const typeDocs = await manager.find(req, {
+              _id: { $in: byType[type] }
+            }).toArray();
+            docs = docs.concat(typeDocs);
+          }
+
+          // Restore the intended order ($in doesn't respect it and neither does
+          // fetching them all by type)
+          const orderedDocs = self.apos.util.orderById(
+            idsAndTypes.map(d => d._id),
+            docs
+          );
+
+          return {
+            results: orderedDocs.map(doc => ({
+              _id: doc._id,
+              title: doc.title,
+              type: doc.type,
+              slug: doc.slug,
+              _url: doc._url,
+              searchSummary: doc.searchSummary
+            }))
+          };
+        },
         async poll(req) {
           self.requireUser(req);
           const { messageId, lastIndex } = req.query;
@@ -138,22 +187,6 @@ IMPORTANT:
   },
   methods(self) {
     return {
-      getContentTypes() {
-        const types = [];
-        for (const [name, manager] of Object.entries(self.apos.doc.managers)) {
-          const isPage = self.apos.instanceOf(manager, '@apostrophecms/page-type');
-          const isPiece = self.apos.instanceOf(manager, '@apostrophecms/piece-type');
-          if (!isPage && !isPiece) {
-            continue;
-          }
-          types.push({
-            name,
-            label: manager.options.label || name,
-            isPage
-          });
-        }
-        return types;
-      },
       db() {
         return self.apos.db.collection('aposChatbotMessages');
       },
@@ -269,33 +302,22 @@ IMPORTANT:
         const { name, input } = toolUseBlock;
 
         if (name === 'search') {
-          return self.executeSearch(messageId, input.query, input.type);
+          return self.executeSearch(messageId, input.query);
         }
 
         return { error: `Unknown tool: ${name}` };
       },
-      async executeSearch(messageId, query, contentType) {
-        console.log('[chatbot] executeSearch:', { messageId, query, contentType });
-        // Determine if this is a page type
-        let isPage = false;
-        if (contentType) {
-          const typeInfo = self.contentTypes.find(t => t.name === contentType);
-          if (typeInfo) {
-            isPage = typeInfo.isPage;
-          }
-        }
-        console.log('[chatbot] Setting pending action for browser:', { query, contentType, isPage });
+      async executeSearch(messageId, query) {
+        console.log('[chatbot] executeSearch:', { messageId, query });
 
-        // Set pending action for browser to execute
+        // Set pending action for browser to execute via polymorphic search API
         await self.db().updateOne(
           { messageId },
           {
             $set: {
               pendingAction: {
                 type: 'search',
-                query,
-                contentType, // null for global search, or specific type name
-                isPage
+                query
               },
               actionResult: null
             }

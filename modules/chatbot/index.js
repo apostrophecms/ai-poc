@@ -43,6 +43,79 @@ IMPORTANT:
                 },
                 required: ['query']
               }
+            },
+            {
+              name: 'update',
+              description: `Update a document in the CMS by its _id.
+
+Use this to modify content like articles, pages, or other editable documents.
+
+IMPORTANT:
+- You must have the document's _id from a previous search result.
+- Only update fields that the user explicitly asked to change.
+- For rich text or area fields, you may need to understand their structure.
+- You CANNOT update users or permission groups - those requests will be rejected.`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  _id: {
+                    type: 'string',
+                    description: 'The _id of the document to update (from search results)'
+                  },
+                  updates: {
+                    type: 'object',
+                    description: 'An object containing the fields to update and their new values'
+                  }
+                },
+                required: ['_id', 'updates']
+              }
+            },
+            {
+              name: 'doc-schema',
+              description: `Get the schema for a document type (pieces and pages).
+
+Use this to understand what fields exist on document types like articles, pages, images, etc.
+
+Call with no parameters to list all available doc types.
+Call with a specific type name to get its full schema.
+
+IMPORTANT:
+- Area fields have an 'options.widgets' property showing which widgets they accept
+- Use widget-schema to understand how to construct widget content for areas`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  typeName: {
+                    type: 'string',
+                    description: 'The doc type (e.g., "article", "default-page", "@apostrophecms/home-page") to get the schema for. Omit to list all available doc types.'
+                  }
+                },
+                required: []
+              }
+            },
+            {
+              name: 'widget-schema',
+              description: `Get the schema for a widget type.
+
+Use this to understand how to construct widget content for area fields.
+
+Call with no parameters to list all available widget types.
+Call with a specific widget type name to get its full schema.
+
+IMPORTANT:
+- Widgets go inside area fields on documents
+- Each widget needs a proper structure with _id, metaType: 'widget', and type
+- Layout widgets have nested areas in their columns`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  typeName: {
+                    type: 'string',
+                    description: 'The widget type (e.g., "@apostrophecms/rich-text", "@apostrophecms/image", "@apostrophecms/layout") to get the schema for. Omit to list all available widget types.'
+                  }
+                },
+                required: []
+              }
             }
           ];
           console.log('[chatbot] Tools configured:', JSON.stringify(self.tools, null, 2));
@@ -150,14 +223,7 @@ IMPORTANT:
           );
 
           return {
-            results: orderedDocs.map(doc => ({
-              _id: doc._id,
-              title: doc.title,
-              type: doc.type,
-              slug: doc.slug,
-              _url: doc._url,
-              searchSummary: doc.searchSummary
-            }))
+            results: orderedDocs
           };
         },
         async poll(req) {
@@ -322,6 +388,18 @@ IMPORTANT:
           return self.executeSearch(messageId, input.query);
         }
 
+        if (name === 'update') {
+          return self.executeUpdate(messageId, input._id, input.updates);
+        }
+
+        if (name === 'doc-schema') {
+          return self.executeDocSchema(input.typeName);
+        }
+
+        if (name === 'widget-schema') {
+          return self.executeWidgetSchema(input.typeName);
+        }
+
         return { error: `Unknown tool: ${name}` };
       },
       async executeSearch(messageId, query) {
@@ -346,6 +424,99 @@ IMPORTANT:
         const result = await self.waitForActionResult(messageId);
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
         return result;
+      },
+      async executeUpdate(messageId, _id, updates) {
+        console.log('[chatbot] executeUpdate:', { messageId, _id, updates });
+
+        // Protected types that cannot be modified via AI
+        const protectedTypes = [
+          '@apostrophecms/user',
+          '@apostrophecms/advanced-permission-group'
+        ];
+
+        // Look up the document to get its type
+        const doc = await self.apos.doc.db.findOne({ _id });
+        if (!doc) {
+          return { error: `Document not found: ${_id}` };
+        }
+
+        // Check if it's a protected type
+        if (protectedTypes.includes(doc.type)) {
+          return { error: `Cannot modify ${doc.type} documents for security reasons` };
+        }
+
+        // Set pending action for browser to execute via REST API
+        await self.db().updateOne(
+          { messageId },
+          {
+            $set: {
+              pendingAction: {
+                type: 'update',
+                _id,
+                docType: doc.type,
+                updates
+              },
+              actionResult: null
+            }
+          }
+        );
+
+        // Wait for browser to execute and return result
+        console.log('[chatbot] Waiting for browser action result...');
+        const result = await self.waitForActionResult(messageId);
+        console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
+        return result;
+      },
+      executeDocSchema(typeName) {
+        console.log('[chatbot] executeDocSchema:', { typeName });
+
+        // If no type specified, list all available doc types
+        if (!typeName) {
+          const docTypes = Object.keys(self.apos.doc.managers).filter(name => {
+            const manager = self.apos.doc.managers[name];
+            return manager.schema && manager.schema.length > 0;
+          });
+
+          return {
+            docTypes,
+            hint: 'Call doc-schema again with a specific typeName to get its full schema'
+          };
+        }
+
+        const docManager = self.apos.doc.managers[typeName];
+        if (docManager && docManager.schema) {
+          return {
+            typeName,
+            schema: docManager.schema
+          };
+        }
+
+        return { error: `Doc type not found: ${typeName}. Call doc-schema with no parameters to list available types.` };
+      },
+      executeWidgetSchema(typeName) {
+        console.log('[chatbot] executeWidgetSchema:', { typeName });
+
+        // If no type specified, list all available widget types
+        if (!typeName) {
+          const widgetTypes = Object.keys(self.apos.area.widgetManagers);
+
+          return {
+            widgetTypes,
+            hint: 'Call widget-schema again with a specific typeName to get its full schema'
+          };
+        }
+
+        // Try exact match first
+        let widgetManager = self.apos.area.widgetManagers[typeName];
+
+        if (widgetManager && widgetManager.schema) {
+          return {
+            typeName,
+            schema: widgetManager.schema
+          };
+        }
+
+        return { error: `Widget type not found: ${typeName}. Call widget-schema with no parameters to list available types.` };
       },
       async waitForActionResult(messageId, timeoutMs = 30000) {
         const startTime = Date.now();

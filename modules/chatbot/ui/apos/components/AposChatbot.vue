@@ -157,6 +157,8 @@ export default {
       try {
         if (action.type === 'search') {
           result = await this.search(action.query);
+        } else if (action.type === 'update') {
+          result = await this.update(action._id, action.docType, action.updates);
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
@@ -174,8 +176,8 @@ export default {
       });
     },
     async search(query) {
-      // Use polymorphic search API that searches all content types
-      const url = `/api/v1/chatbot/search?q=${encodeURIComponent(query)}`;
+      // Use polymorphic search API that searches all content types (draft mode)
+      const url = `/api/v1/chatbot/search?aposMode=draft&q=${encodeURIComponent(query)}`;
 
       console.log('[chatbot-browser] Fetching:', url);
       const response = await fetch(url);
@@ -187,6 +189,39 @@ export default {
       return {
         total: data.results.length,
         results: data.results
+      };
+    },
+    async update(_id, docType, updates) {
+      const url = `/api/v1/${docType}/${_id}?aposMode=draft`;
+
+      // First GET the current document (draft mode)
+      console.log('[chatbot-browser] Fetching document:', url);
+      const getResponse = await fetch(url);
+      if (!getResponse.ok) {
+        throw new Error(`Failed to fetch document: ${getResponse.status}`);
+      }
+      const currentDoc = await getResponse.json();
+      console.log('[chatbot-browser] Current document:', currentDoc);
+
+      // PATCH with updates (draft mode)
+      console.log('[chatbot-browser] Patching document:', url, updates);
+      const patchResponse = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      if (!patchResponse.ok) {
+        const errorText = await patchResponse.text();
+        throw new Error(`Failed to update document: ${patchResponse.status} ${errorText}`);
+      }
+      const updatedDoc = await patchResponse.json();
+      console.log('[chatbot-browser] Updated document:', updatedDoc);
+
+      return {
+        success: true,
+        _id: updatedDoc._id,
+        title: updatedDoc.title,
+        type: updatedDoc.type
       };
     },
     delay(ms) {

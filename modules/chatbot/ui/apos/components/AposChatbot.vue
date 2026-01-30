@@ -159,6 +159,8 @@ export default {
           result = await this.search(action.query);
         } else if (action.type === 'update') {
           result = await this.update(action._id, action.docType, action.updates);
+        } else if (action.type === 'get-context') {
+          result = await this.getContext();
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
@@ -169,11 +171,51 @@ export default {
 
       console.log('[chatbot-browser] Sending result back to server:', result);
       // Send result back to server
+      console.log(`${messageId} ${action.type} ${action.query} result length is:`, JSON.stringify(result).length);
+
       await fetch('/api/v1/chatbot/action-result', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messageId, result })
       });
+    },
+    async getContext() {
+      // Get the current context document
+      const context = apos.adminBar.context;
+      if (!context || !context._id || !context.type) {
+        return { error: 'No context document available - the user is not viewing a specific page or piece.' };
+      }
+
+      // Use the module's action URL to fetch the full document
+      const module = apos.modules[context.type];
+      if (!module || !module.action) {
+        return { error: `Cannot find REST API for type: ${context.type}` };
+      }
+
+      const url = `${module.action}/${context._id}?aposMode=draft`;
+      console.log('[chatbot-browser] Fetching context document:', url);
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch context document: ${response.status}`);
+      }
+
+      const doc = await response.json();
+      console.log('[chatbot-browser] Context document:', doc);
+      return this.pruneForAI(doc);
+    },
+    // Remove auto-generated search index fields to reduce token usage
+    pruneForAI(doc) {
+      if (!doc) {
+        return doc;
+      }
+      const pruned = { ...doc };
+      delete pruned.lowSearchText;
+      delete pruned.highSearchText;
+      delete pruned.highSearchWords;
+      delete pruned.searchSummary;
+      delete pruned.titleSortified;
+      return pruned;
     },
     async search(query) {
       // Use polymorphic search API that searches all content types (draft mode)

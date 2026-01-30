@@ -116,6 +116,40 @@ IMPORTANT:
                 },
                 required: []
               }
+            },
+            {
+              name: 'generate-id',
+              description: `Generate a unique _id for a new widget or other object.
+
+IMPORTANT: You MUST use this tool whenever you need to create a new _id.
+- Call this tool BEFORE constructing any new widget
+- Never make up or guess _id values
+- Each new widget needs its own unique _id from this tool`,
+              input_schema: {
+                type: 'object',
+                properties: {},
+                required: []
+              }
+            },
+            {
+              name: 'get-context',
+              description: `Get the current "context document" - the page or piece the user is currently viewing or editing.
+
+Use this when:
+- The user's request doesn't clearly specify which document to operate on
+- The user says things like "update this page", "change the title", "add a widget here"
+- The document is the implied object of the user's sentence
+
+Do NOT use this when:
+- The user clearly specifies a different document (e.g., "update the cats article")
+- You already have the document from a search result
+
+Returns the full current document with all fields, or an error if there is no context document.`,
+              input_schema: {
+                type: 'object',
+                properties: {},
+                required: []
+              }
             }
           ];
           console.log('[chatbot] Tools configured:', JSON.stringify(self.tools, null, 2));
@@ -223,7 +257,7 @@ IMPORTANT:
           );
 
           return {
-            results: orderedDocs
+            results: orderedDocs.map(doc => self.pruneForAI(doc))
           };
         },
         async poll(req) {
@@ -278,6 +312,20 @@ IMPORTANT:
           throw self.apos.error('forbidden', 'Login required');
         }
       },
+      // Remove auto-generated search index fields to reduce token usage
+      // These are regenerated on save and not part of the actual schema
+      pruneForAI(doc) {
+        if (!doc) {
+          return doc;
+        }
+        const pruned = { ...doc };
+        delete pruned.lowSearchText;
+        delete pruned.highSearchText;
+        delete pruned.highSearchWords;
+        delete pruned.searchSummary;
+        delete pruned.titleSortified;
+        return pruned;
+      },
       async addResponse(messageId, text, final) {
         await self.db().updateOne(
           { messageId },
@@ -322,28 +370,35 @@ IMPORTANT:
           // Handle tool use loop
           while (response.stop_reason === 'tool_use') {
             console.log('[chatbot] Tool use detected');
-            const toolUseBlock = response.content.find(block => block.type === 'tool_use');
-            if (!toolUseBlock) {
-              console.log('[chatbot] No tool_use block found, breaking');
+            const toolUseBlocks = response.content.filter(block => block.type === 'tool_use');
+            if (toolUseBlocks.length === 0) {
+              console.log('[chatbot] No tool_use blocks found, breaking');
               break;
             }
 
-            console.log('[chatbot] Executing tool:', toolUseBlock.name, 'with input:', toolUseBlock.input);
-            const toolResult = await self.executeTool(messageId, toolUseBlock);
-            console.log('[chatbot] Tool result:', JSON.stringify(toolResult, null, 2));
+            console.log('[chatbot] Executing', toolUseBlocks.length, 'tool(s)');
 
-            // Continue conversation with tool result
-            messages.push({ role: 'assistant', content: response.content });
-            messages.push({
-              role: 'user',
-              content: [{
+            // Execute all tool calls and collect results
+            const toolResults = [];
+            for (const toolUseBlock of toolUseBlocks) {
+              console.log('[chatbot] Executing tool:', toolUseBlock.name, 'with input:', toolUseBlock.input);
+              const toolResult = await self.executeTool(messageId, toolUseBlock);
+              console.log('[chatbot] Tool result:', JSON.stringify(toolResult, null, 2));
+              toolResults.push({
                 type: 'tool_result',
                 tool_use_id: toolUseBlock.id,
                 content: JSON.stringify(toolResult)
-              }]
+              });
+            }
+
+            // Continue conversation with all tool results
+            messages.push({ role: 'assistant', content: response.content });
+            messages.push({
+              role: 'user',
+              content: toolResults
             });
 
-            console.log('[chatbot] Calling Claude again with tool result');
+            console.log('[chatbot] Calling Claude again with', toolResults.length, 'tool result(s)');
             response = await self.callClaude(messages);
             console.log('[chatbot] Claude response after tool:', JSON.stringify(response, null, 2));
           }
@@ -376,10 +431,17 @@ MAKING UPDATES:
 
 UPDATING WIDGETS (IMPORTANT):
 - To update a specific widget, use an "@ reference" with the widget's _id.
-- Format: { "@widgetIdHere": { ...fields to update... } }
-- Example: To update a rich-text widget's content, use: { "@abc123": { "content": "<p>New text</p>" } }
-- This lets you surgically update one widget without touching the rest of the area.
+- Format: { "@widgetIdHere": { ...all widget properties... } }
+- You MUST include ALL properties of the widget, including _id, type, and metaType.
+- The @ reference targets the widget but you must send the complete widget object.
+- Example: { "@abc123": { "_id": "abc123", "type": "@apostrophecms/rich-text", "metaType": "widget", "content": "<p>New text</p>" } }
+- NEVER omit _id, type, or metaType - the widget will break without them.
 - NEVER replace an entire area array - always use @ references to update specific widgets.
+
+CREATING NEW WIDGETS OR OTHER OBJECTS:
+- When creating a new widget or anything else that requires its own _id, you MUST call the generate-id tool first.
+- NEVER make up or guess _id values - always use generate-id.
+- Each new widget needs: _id (from generate-id), metaType: "widget", and type (the widget type name).
 
 You have full permission to search, read schemas, and update content. Use your tools.`;
 
@@ -425,6 +487,14 @@ You have full permission to search, read schemas, and update content. Use your t
           return self.executeWidgetSchema(input.typeName);
         }
 
+        if (name === 'generate-id') {
+          return { _id: self.apos.util.generateId() };
+        }
+
+        if (name === 'get-context') {
+          return self.executeGetContext(messageId);
+        }
+
         return { error: `Unknown tool: ${name}` };
       },
       async executeSearch(messageId, query) {
@@ -438,6 +508,28 @@ You have full permission to search, read schemas, and update content. Use your t
               pendingAction: {
                 type: 'search',
                 query
+              },
+              actionResult: null
+            }
+          }
+        );
+
+        // Wait for browser to execute and return result
+        console.log('[chatbot] Waiting for browser action result...');
+        const result = await self.waitForActionResult(messageId);
+        console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
+        return result;
+      },
+      async executeGetContext(messageId) {
+        console.log('[chatbot] executeGetContext:', { messageId });
+
+        // Set pending action for browser to fetch context document
+        await self.db().updateOne(
+          { messageId },
+          {
+            $set: {
+              pendingAction: {
+                type: 'get-context'
               },
               actionResult: null
             }

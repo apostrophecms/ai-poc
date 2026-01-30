@@ -119,7 +119,7 @@ export default {
     },
     async pollForResponses(messageId) {
       const pollInterval = 500;
-      const maxAttempts = 120;
+      const maxAttempts = 1000;
       let attempts = 0;
       let lastIndex = 0;
       while (attempts < maxAttempts) {
@@ -288,8 +288,6 @@ export default {
 
       return {
         success: true,
-        _id: updatedDoc._id,
-        title: updatedDoc.title,
         widgetId: widget._id
       };
     },
@@ -354,10 +352,7 @@ export default {
       });
 
       return {
-        success: true,
-        _id: updatedDoc._id,
-        title: updatedDoc.title,
-        type: updatedDoc.type
+        success: true
       };
     },
     delay(ms) {

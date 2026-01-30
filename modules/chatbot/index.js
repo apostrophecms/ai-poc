@@ -368,6 +368,19 @@ CRITICAL INSTRUCTIONS:
 - After making changes, confirm what was actually done based on the tool result.
 - If a tool call fails, report the actual error to the user.
 
+MAKING UPDATES:
+- Make MINIMAL, surgical updates. Only include the specific fields you're changing.
+- For simple field changes (title, slug, etc.), just update that one field.
+- NEVER send back an entire document - only the fields that need to change.
+- Keep your update payloads as small as possible to avoid truncation.
+
+UPDATING WIDGETS (IMPORTANT):
+- To update a specific widget, use an "@ reference" with the widget's _id.
+- Format: { "@widgetIdHere": { ...fields to update... } }
+- Example: To update a rich-text widget's content, use: { "@abc123": { "content": "<p>New text</p>" } }
+- This lets you surgically update one widget without touching the rest of the area.
+- NEVER replace an entire area array - always use @ references to update specific widgets.
+
 You have full permission to search, read schemas, and update content. Use your tools.`;
 
         const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -378,8 +391,8 @@ You have full permission to search, read schemas, and update content. Use your t
             'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 2048,
+            model: 'claude-sonnet-4-5-20250929',
+            max_tokens: 8192,
             system: systemPrompt,
             tools: self.tools,
             messages

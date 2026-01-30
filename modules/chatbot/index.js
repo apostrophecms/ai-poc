@@ -359,6 +359,17 @@ IMPORTANT:
         }
       },
       async callClaude(messages) {
+        const systemPrompt = `You are a helpful CMS assistant with access to tools for searching and updating content.
+
+CRITICAL INSTRUCTIONS:
+- When the user asks you to make a change, you MUST actually call the update tool. Do not just describe what you would do.
+- Never say "I will update..." or "Let me update..." without immediately following through with the tool call.
+- If you need information first, use the search or schema tools to get it.
+- After making changes, confirm what was actually done based on the tool result.
+- If a tool call fails, report the actual error to the user.
+
+You have full permission to search, read schemas, and update content. Use your tools.`;
+
         const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
@@ -368,7 +379,8 @@ IMPORTANT:
           },
           body: JSON.stringify({
             model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
+            max_tokens: 2048,
+            system: systemPrompt,
             tools: self.tools,
             messages
           })

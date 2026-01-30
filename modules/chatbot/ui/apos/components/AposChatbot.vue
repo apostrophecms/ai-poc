@@ -217,6 +217,12 @@ export default {
       const updatedDoc = await patchResponse.json();
       console.log('[chatbot-browser] Updated document:', updatedDoc);
 
+      // Emit event so Apostrophe UI reflects the change
+      apos.bus.$emit('content-changed', {
+        doc: updatedDoc,
+        action: 'update'
+      });
+
       return {
         success: true,
         _id: updatedDoc._id,

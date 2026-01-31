@@ -342,56 +342,6 @@ Returns the full current document with all fields, or an error if there is no co
       db() {
         return self.apos.db.collection('aposChatbotMessages');
       },
-      rateLimitDb() {
-        return self.apos.db.collection('aposChatbotRateLimit');
-      },
-      // Record token usage for rate limiting
-      async recordTokenUsage(inputTokens, outputTokens) {
-        await self.rateLimitDb().insertOne({
-          inputTokens,
-          outputTokens,
-          totalTokens: inputTokens + outputTokens,
-          timestamp: new Date()
-        });
-        // Clean up entries older than 2 minutes
-        await self.rateLimitDb().deleteMany({
-          timestamp: { $lt: new Date(Date.now() - 120000) }
-        });
-      },
-      // Wait if necessary to stay under rate limit
-      async waitForRateLimit(messageId, estimatedTokens, maxTokensPerMinute = 30000) {
-        const oneMinuteAgo = new Date(Date.now() - 60000);
-        const records = await self.rateLimitDb()
-          .find({ timestamp: { $gte: oneMinuteAgo } })
-          .sort({ timestamp: 1 })
-          .toArray();
-
-        const recentUsage = records.reduce((sum, r) => sum + r.inputTokens, 0);
-        if (recentUsage + estimatedTokens <= maxTokensPerMinute) {
-          return;
-        }
-
-        // Calculate how long to wait until enough tokens expire
-        const tokensToFree = (recentUsage + estimatedTokens) - maxTokensPerMinute;
-        let freedTokens = 0;
-        let waitMs = 60000; // Default to full minute
-
-        for (const record of records) {
-          freedTokens += record.inputTokens;
-          if (freedTokens >= tokensToFree) {
-            const expiresAt = record.timestamp.getTime() + 60000;
-            waitMs = expiresAt - Date.now() + 100; // +100ms buffer
-            break;
-          }
-        }
-
-        const waitSeconds = Math.ceil(Math.max(0, waitMs) / 1000);
-        if (waitSeconds > 0) {
-          console.log(`[chatbot] Rate limit: waiting ${waitSeconds}s for token budget`);
-          await self.addResponse(messageId, `⏳ Rate limited - waiting ${waitSeconds} second${waitSeconds > 1 ? 's' : ''}...`, false);
-          await self.delay(waitSeconds * 1000);
-        }
-      },
       requireUser(req) {
         if (!req.user) {
           throw self.apos.error('forbidden', 'Login required');
@@ -555,46 +505,45 @@ RELATIONSHIP FIELDS:
 
 You have full permission to search, read schemas, and update content. Use your tools.`;
 
-        // Estimate input tokens (rough: ~4 chars per token)
-        const inputJson = JSON.stringify({ system: systemPrompt, tools: self.tools, messages });
-        const estimatedTokens = Math.ceil(inputJson.length / 4);
-
-        // Wait for rate limit before calling
-        await self.waitForRateLimit(messageId, estimatedTokens);
-
-        console.log(`[chatbot] Estimated ${estimatedTokens} input tokens, calling API...`);
-
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': self.apiKey,
-            'anthropic-version': '2023-06-01',
-            // To cope with the size of schemas and documents.
-            // Keep working on more and better pruning that doesn't
-            // risk content loss in the process! -Tom
-            'anthropic-beta': 'context-1m-2025-08-07'
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-5-20250929',
-            max_tokens: 8192,
-            system: systemPrompt,
-            tools: self.tools,
-            messages
-          })
+        const body = JSON.stringify({
+          model: 'claude-sonnet-4-5-20250929',
+          max_tokens: 8192,
+          system: systemPrompt,
+          tools: self.tools,
+          messages
         });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Claude API error: ${response.status} ${errorText}`);
-        }
+        const makeRequest = async () => {
+          const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': self.apiKey,
+              'anthropic-version': '2023-06-01'
+            },
+            body
+          });
 
-        const result = await response.json();
+          if (response.status === 429) {
+            // Rate limited - notify user and retry after 30 seconds
+            console.log('[chatbot] Rate limited (429), waiting 30 seconds before retry...');
+            await self.addResponse(messageId, 'Rate limited - waiting 30 seconds...', false);
+            await self.delay(30000);
+            return makeRequest();
+          }
 
-        // Record actual token usage from API response
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Claude API error: ${response.status} ${errorText}`);
+          }
+
+          return response.json();
+        };
+
+        const result = await makeRequest();
+
         if (result.usage) {
-          await self.recordTokenUsage(result.usage.input_tokens, result.usage.output_tokens);
-          console.log(`[chatbot] Actual usage: ${result.usage.input_tokens} input, ${result.usage.output_tokens} output tokens`);
+          console.log(`[chatbot] Token usage: ${result.usage.input_tokens} input, ${result.usage.output_tokens} output`);
         }
 
         return result;

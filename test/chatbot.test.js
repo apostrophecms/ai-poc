@@ -235,13 +235,31 @@ describe('Chatbot Schema Format Comparison', function () {
     throw new Error('Timeout waiting for chat response');
   }
 
+  // Extract only core properties to minimize token usage
+  function toCoreProperties(doc) {
+    if (!doc) {
+      return doc;
+    }
+    return {
+      _id: doc._id,
+      aposDocId: doc.aposDocId,
+      type: doc.type,
+      title: doc.title,
+      slug: doc.slug
+    };
+  }
+
   async function executeAction(action, contextDoc) {
     if (action.type === 'search') {
       const result = await apos.http.get('/api/v1/chatbot/search', {
         qs: { q: action.query, aposMode: 'draft' },
         jar
       });
-      return { total: result.results.length, results: result.results };
+      // Return only core properties to save tokens
+      return {
+        total: result.results.length,
+        results: result.results.map(doc => toCoreProperties(doc))
+      };
     }
 
     if (action.type === 'get-context') {
@@ -252,10 +270,14 @@ describe('Chatbot Schema Format Comparison', function () {
         qs: { aposMode: 'draft' },
         jar
       });
-      return pruneForAI(doc);
+      // Return only core properties to save tokens
+      return toCoreProperties(doc);
     }
 
     if (action.type === 'update') {
+      const url = `/api/v1/${action.docType}/${action._id}?aposMode=draft`;
+      console.log('[test] PATCH', url);
+      console.log('[test] PATCH body:', JSON.stringify(action.updates, null, 2));
       await apos.http.patch(`/api/v1/${action.docType}/${action._id}`, {
         qs: { aposMode: 'draft' },
         body: action.updates,
@@ -280,15 +302,67 @@ describe('Chatbot Schema Format Comparison', function () {
         items.splice(action.position, 0, action.widget);
       }
       area.items = items;
+      const url = `/api/v1/${action.docType}/${action.docId}?aposMode=draft`;
+      const patch = { [`@${action.areaId}`]: area };
+      console.log('[test] PATCH', url);
+      console.log('[test] PATCH body:', JSON.stringify(patch, null, 2));
       await apos.http.patch(`/api/v1/${action.docType}/${action.docId}`, {
         qs: { aposMode: 'draft' },
-        body: { [`@${action.areaId}`]: area },
+        body: patch,
         jar
       });
       return { success: true, widgetId: action.widget._id };
     }
 
+    if (action.type === 'delete-widget') {
+      const currentDoc = await apos.http.get(`/api/v1/${action.docType}/${action.docId}`, {
+        qs: { aposMode: 'draft' },
+        jar
+      });
+      const result = findAndRemoveWidget(currentDoc, action.widgetId);
+      if (!result) {
+        return { error: `Widget not found: ${action.widgetId}` };
+      }
+      const url = `/api/v1/${action.docType}/${action.docId}?aposMode=draft`;
+      const patch = { [`@${result.areaId}`]: result.area };
+      console.log('[test] PATCH', url);
+      console.log('[test] PATCH body:', JSON.stringify(patch, null, 2));
+      await apos.http.patch(`/api/v1/${action.docType}/${action.docId}`, {
+        qs: { aposMode: 'draft' },
+        body: patch,
+        jar
+      });
+      return { success: true, deletedWidgetId: action.widgetId };
+    }
+
     return { error: `Unknown action type: ${action.type}` };
+  }
+
+  // Find a widget by _id and remove it from its parent area
+  function findAndRemoveWidget(obj, widgetId) {
+    if (!obj || typeof obj !== 'object') return null;
+
+    // Check if this is an area
+    if (obj.metaType === 'area' && Array.isArray(obj.items)) {
+      const index = obj.items.findIndex(item => item._id === widgetId);
+      if (index !== -1) {
+        obj.items.splice(index, 1);
+        return { area: obj, areaId: obj._id };
+      }
+      for (const item of obj.items) {
+        const result = findAndRemoveWidget(item, widgetId);
+        if (result) return result;
+      }
+    }
+
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
+      if (value && typeof value === 'object') {
+        const result = findAndRemoveWidget(value, widgetId);
+        if (result) return result;
+      }
+    }
+    return null;
   }
 
   function findAreaById(obj, areaId) {
@@ -307,17 +381,6 @@ describe('Chatbot Schema Format Comparison', function () {
       }
     }
     return null;
-  }
-
-  function pruneForAI(doc) {
-    if (!doc) return doc;
-    const pruned = { ...doc };
-    delete pruned.lowSearchText;
-    delete pruned.highSearchText;
-    delete pruned.highSearchWords;
-    delete pruned.searchSummary;
-    delete pruned.titleSortified;
-    return pruned;
   }
 
   function delay(ms) {

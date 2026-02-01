@@ -7,10 +7,15 @@
         class="apos-chatbot__message"
         :class="{
           'apos-chatbot__message--user': message.fromUser,
-          'apos-chatbot__message--final': message.final
+          'apos-chatbot__message--final': message.final,
+          'apos-chatbot__message--accordion': message.accordion
         }"
       >
         <template v-if="message.fromUser">{{ message.text }}</template>
+        <details v-else-if="message.accordion" class="apos-chatbot__accordion">
+          <summary class="apos-chatbot__accordion-summary">{{ message.accordionSummary }}</summary>
+          <pre class="apos-chatbot__accordion-content">{{ message.text }}</pre>
+        </details>
         <div v-else v-html="renderMarkdown(message.text)" class="apos-chatbot__markdown"></div>
       </div>
     </div>
@@ -68,7 +73,12 @@ export default {
         for (const entry of data.entries) {
           this.messages.push({ text: entry.userMessage, fromUser: true });
           for (const resp of entry.responses) {
-            this.messages.push({ text: resp.text, fromUser: false, final: resp.final });
+            const message = { text: resp.text, fromUser: false, final: resp.final };
+            if (resp.accordion) {
+              message.accordion = true;
+              message.accordionSummary = resp.accordionSummary || 'Details';
+            }
+            this.messages.push(message);
           }
         }
         if (this.messages.length === 0) {
@@ -79,8 +89,13 @@ export default {
         this.messages.push({ text: 'Error loading chat history', fromUser: false, final: true });
       }
     },
-    addMessage(text, fromUser = false, final = false) {
-      this.messages.push({ text, fromUser, final });
+    addMessage(text, fromUser = false, final = false, options = {}) {
+      const message = { text, fromUser, final };
+      if (options.accordion) {
+        message.accordion = true;
+        message.accordionSummary = options.accordionSummary || 'Details';
+      }
+      this.messages.push(message);
       this.scrollToBottom();
     },
     scrollToBottom() {
@@ -138,7 +153,10 @@ export default {
 
         let receivedFinal = false;
         for (const resp of data.responses) {
-          this.addMessage(resp.text, false, resp.final);
+          this.addMessage(resp.text, false, resp.final, {
+            accordion: resp.accordion,
+            accordionSummary: resp.accordionSummary
+          });
           lastIndex++;
           if (resp.final) {
             receivedFinal = true;
@@ -163,6 +181,8 @@ export default {
           result = await this.getContext();
         } else if (action.type === 'add-widget') {
           result = await this.addWidget(action.docId, action.docType, action.areaId, action.widget, action.position);
+        } else if (action.type === 'delete-widget') {
+          result = await this.deleteWidget(action.docId, action.docType, action.widgetId);
         } else {
           result = { error: `Unknown action type: ${action.type}` };
         }
@@ -204,20 +224,21 @@ export default {
 
       const doc = await response.json();
       console.log('[chatbot-browser] Context document:', doc);
-      return this.pruneForAI(doc);
+      // Return only core properties to save tokens
+      return this.toCoreProperties(doc);
     },
-    // Remove auto-generated search index fields to reduce token usage
-    pruneForAI(doc) {
+    // Extract only core properties to minimize token usage
+    toCoreProperties(doc) {
       if (!doc) {
         return doc;
       }
-      const pruned = { ...doc };
-      delete pruned.lowSearchText;
-      delete pruned.highSearchText;
-      delete pruned.highSearchWords;
-      delete pruned.searchSummary;
-      delete pruned.titleSortified;
-      return pruned;
+      return {
+        _id: doc._id,
+        aposDocId: doc.aposDocId,
+        type: doc.type,
+        title: doc.title,
+        slug: doc.slug
+      };
     },
     async search(query) {
       // Use polymorphic search API that searches all content types (draft mode)
@@ -230,9 +251,10 @@ export default {
       }
       const data = await response.json();
       console.log('[chatbot-browser] Search results:', data);
+      // Return only core properties to save tokens
       return {
         total: data.results.length,
-        results: data.results
+        results: data.results.map(doc => this.toCoreProperties(doc))
       };
     },
     async addWidget(docId, docType, areaId, widget, position) {
@@ -267,7 +289,7 @@ export default {
         [`@${areaId}`]: area
       };
 
-      console.log('[chatbot-browser] Patching with new widget:', url);
+      this.addPatchDebugMessage(url, patch);
       const patchResponse = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -290,6 +312,88 @@ export default {
         success: true,
         widgetId: widget._id
       };
+    },
+    async deleteWidget(docId, docType, widgetId) {
+      const url = `/api/v1/${docType}/${docId}?aposMode=draft`;
+
+      // First GET the current document
+      console.log('[chatbot-browser] Fetching document for delete-widget:', url);
+      const getResponse = await fetch(url);
+      if (!getResponse.ok) {
+        throw new Error(`Failed to fetch document: ${getResponse.status}`);
+      }
+      const currentDoc = await getResponse.json();
+
+      // Find the area containing the widget and remove it
+      const result = this.findAndRemoveWidget(currentDoc, widgetId);
+      if (!result) {
+        throw new Error(`Widget not found: ${widgetId}`);
+      }
+
+      // PATCH with @ reference to update the area
+      const patch = {
+        [`@${result.areaId}`]: result.area
+      };
+
+      this.addPatchDebugMessage(url, patch);
+      const patchResponse = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      if (!patchResponse.ok) {
+        const errorText = await patchResponse.text();
+        throw new Error(`Failed to delete widget: ${patchResponse.status} ${errorText}`);
+      }
+      const updatedDoc = await patchResponse.json();
+      console.log('[chatbot-browser] Widget deleted successfully');
+
+      // Emit event so Apostrophe UI reflects the change
+      apos.bus.$emit('content-changed', {
+        doc: updatedDoc,
+        action: 'update'
+      });
+
+      return {
+        success: true,
+        deletedWidgetId: widgetId
+      };
+    },
+    // Find a widget by _id and remove it from its parent area
+    findAndRemoveWidget(obj, widgetId, parentArea = null, parentAreaId = null) {
+      if (!obj || typeof obj !== 'object') {
+        return null;
+      }
+
+      // Check if this is an area
+      if (obj.metaType === 'area' && Array.isArray(obj.items)) {
+        const index = obj.items.findIndex(item => item._id === widgetId);
+        if (index !== -1) {
+          // Found it - remove and return the area info
+          obj.items.splice(index, 1);
+          return { area: obj, areaId: obj._id };
+        }
+        // Recurse into widgets in this area
+        for (const item of obj.items) {
+          const result = this.findAndRemoveWidget(item, widgetId, obj, obj._id);
+          if (result) {
+            return result;
+          }
+        }
+      }
+
+      // Recurse into all properties
+      for (const key of Object.keys(obj)) {
+        const value = obj[key];
+        if (value && typeof value === 'object') {
+          const result = this.findAndRemoveWidget(value, widgetId, parentArea, parentAreaId);
+          if (result) {
+            return result;
+          }
+        }
+      }
+
+      return null;
     },
     // Recursively find an area by its _id
     findAreaById(obj, areaId) {
@@ -332,7 +436,7 @@ export default {
       console.log('[chatbot-browser] Current document:', currentDoc);
 
       // PATCH with updates (draft mode)
-      console.log('[chatbot-browser] Patching document:', url, updates);
+      this.addPatchDebugMessage(url, updates);
       const patchResponse = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -357,6 +461,20 @@ export default {
     },
     delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    },
+    addPatchDebugMessage(url, body) {
+      const bodyJson = JSON.stringify(body, null, 2);
+      const charCount = bodyJson.length;
+      // Extract first ~100 chars for preview
+      let preview = bodyJson.substring(0, 100).replace(/\n/g, ' ');
+      if (bodyJson.length > 100) {
+        preview += '...';
+      }
+      const summary = `PATCH ${url.split('?')[0]} (${charCount.toLocaleString()} chars) — ${preview}`;
+      this.addMessage(bodyJson, false, false, {
+        accordion: true,
+        accordionSummary: summary
+      });
     },
     renderMarkdown(text) {
       return marked(text || '');
@@ -468,6 +586,44 @@ export default {
 
 .apos-chatbot__markdown :deep(a) {
   color: #0066cc;
+}
+
+.apos-chatbot__message--accordion {
+  max-width: 100%;
+  background-color: #e8e8e8;
+  font-size: 0.85em;
+}
+
+.apos-chatbot__accordion {
+  width: 100%;
+}
+
+.apos-chatbot__accordion-summary {
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 0.9em;
+  color: #555;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 0;
+}
+
+.apos-chatbot__accordion-summary:hover {
+  color: #000;
+}
+
+.apos-chatbot__accordion-content {
+  margin-top: 8px;
+  padding: 8px;
+  background-color: #f8f8f8;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.85em;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 .apos-chatbot__markdown :deep(h1),

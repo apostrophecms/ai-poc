@@ -36,6 +36,8 @@ export default {
 This searches all content types (articles, pages, images, etc.) and returns results ordered by relevance.
 
 IMPORTANT:
+- Returns only core properties (title, slug, type, _id, aposDocId) to save tokens.
+- Use get-properties to fetch specific field values after finding the document you need.
 - If a search returns no results, try synonyms or alternative phrasings (e.g., "cats" → "cat", "feline", "kitten").
 - Try the user's exact words first, then fall back to alternatives.`,
               input_schema: {
@@ -172,6 +174,31 @@ IMPORTANT:
               }
             },
             {
+              name: 'delete-widget',
+              description: `Delete a widget from an area in a document.
+
+Use this to safely remove a widget without disturbing other widgets in the same area.
+Works with nested areas (e.g., widgets inside layout columns) by finding the widget by its _id.
+
+IMPORTANT:
+- Only removes the specified widget, preserving all other content
+- The widget is identified by its _id`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  docId: {
+                    type: 'string',
+                    description: 'The _id of the document containing the widget'
+                  },
+                  widgetId: {
+                    type: 'string',
+                    description: 'The _id of the widget to delete'
+                  }
+                },
+                required: ['docId', 'widgetId']
+              }
+            },
+            {
               name: 'get-context',
               description: `Get the current "context document" - the page or piece the user is currently viewing or editing.
 
@@ -184,11 +211,45 @@ Do NOT use this when:
 - The user clearly specifies a different document (e.g., "update the cats article")
 - You already have the document from a search result
 
-Returns the full current document with all fields, or an error if there is no context document.`,
+IMPORTANT:
+- Returns only core properties (title, slug, type, _id, aposDocId) to save tokens.
+- Use get-properties to fetch specific field values you need to read or modify.`,
               input_schema: {
                 type: 'object',
                 properties: {},
                 required: []
+              }
+            },
+            {
+              name: 'get-properties',
+              description: `Get specific property values from a document by _id.
+
+Use this to fetch only the fields you need, reducing token usage.
+
+IMPORTANT:
+- Supports dot notation for nested fields (e.g., "main.items.0.content")
+- Area fields are returned ONE LEVEL DEEP only
+- Nested areas within the requested data appear as callback strings like "$callback:main.items.0.columns"
+- To get nested area content, call get-properties again with the callback path (without the "$callback:" prefix)
+- NEVER include $callback strings in update requests - always fetch the actual data first
+
+Example workflow:
+1. get-properties with fields: ["main"] → returns main area with $callback strings for nested areas
+2. get-properties with fields: ["main.items.0.columns"] → returns the nested columns area`,
+              input_schema: {
+                type: 'object',
+                properties: {
+                  _id: {
+                    type: 'string',
+                    description: 'The _id of the document'
+                  },
+                  fields: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Array of field paths to retrieve (supports dot notation)'
+                  }
+                },
+                required: ['_id', 'fields']
               }
             }
           ];
@@ -370,10 +431,121 @@ Returns the full current document with all fields, or an error if there is no co
         delete pruned.titleSortified;
         return pruned;
       },
-      async addResponse(messageId, text, final) {
+      // Extract only core properties to minimize token usage
+      toCoreProperties(doc) {
+        if (!doc) {
+          return doc;
+        }
+        return {
+          _id: doc._id,
+          aposDocId: doc.aposDocId,
+          type: doc.type,
+          title: doc.title,
+          slug: doc.slug
+        };
+      },
+      // Get a value from an object using dot notation path
+      getValueAtPath(obj, path) {
+        const parts = path.split('.');
+        let current = obj;
+        for (const part of parts) {
+          if (current === undefined || current === null) {
+            return undefined;
+          }
+          current = current[part];
+        }
+        return current;
+      },
+      // Process a value for AI, replacing nested areas with $callback strings
+      // basePath is the dot notation path to this value
+      processForAI(value, basePath) {
+        if (value === null || value === undefined) {
+          return value;
+        }
+
+        // Check if this is an area (has metaType: 'area')
+        if (value && typeof value === 'object' && value.metaType === 'area') {
+          // Return the area but process its items
+          const result = {
+            _id: value._id,
+            metaType: 'area',
+            items: []
+          };
+
+          if (Array.isArray(value.items)) {
+            result.items = value.items.map((item, index) => {
+              return self.processWidgetForAI(item, `${basePath}.items.${index}`);
+            });
+          }
+
+          return result;
+        }
+
+        // For non-area objects, return as-is (shallow)
+        return value;
+      },
+      // Process a widget, replacing any nested areas with $callback strings
+      processWidgetForAI(widget, basePath) {
+        if (!widget || typeof widget !== 'object') {
+          return widget;
+        }
+
+        const result = {};
+        for (const [key, value] of Object.entries(widget)) {
+          const fieldPath = `${basePath}.${key}`;
+
+          // Check if this is a nested area
+          if (value && typeof value === 'object' && value.metaType === 'area') {
+            // Replace with callback string
+            result[key] = `$callback:${fieldPath}`;
+          } else if (Array.isArray(value)) {
+            // Check array items for areas
+            result[key] = value.map((item, index) => {
+              if (item && typeof item === 'object' && item.metaType === 'area') {
+                return `$callback:${fieldPath}.${index}`;
+              }
+              return item;
+            });
+          } else {
+            result[key] = value;
+          }
+        }
+
+        return result;
+      },
+      // Check if an object contains any $callback strings (recursive)
+      findCallbackStrings(obj, path = '') {
+        const found = [];
+
+        if (typeof obj === 'string' && obj.startsWith('$callback:')) {
+          found.push({ path, value: obj });
+          return found;
+        }
+
+        if (Array.isArray(obj)) {
+          obj.forEach((item, index) => {
+            found.push(...self.findCallbackStrings(item, path ? `${path}.${index}` : `${index}`));
+          });
+          return found;
+        }
+
+        if (obj && typeof obj === 'object') {
+          for (const [key, value] of Object.entries(obj)) {
+            found.push(...self.findCallbackStrings(value, path ? `${path}.${key}` : key));
+          }
+        }
+
+        return found;
+      },
+      async addResponse(messageId, text, final, options = {}) {
+        const response = { text, final };
+        if (options.accordion) {
+          response.accordion = true;
+          response.accordionSummary = options.accordionSummary || '';
+        }
         await self.db().updateOne(
           { messageId },
-          { $push: { responses: { text, final } } }
+          { $push: { responses: response } }
         );
       },
       async buildConversationHistory(chatId, currentMessageId) {
@@ -469,9 +641,16 @@ Returns the full current document with all fields, or an error if there is no co
 CRITICAL INSTRUCTIONS:
 - When the user asks you to make a change, you MUST actually call the update tool. Do not just describe what you would do.
 - Never say "I will update..." or "Let me update..." without immediately following through with the tool call.
-- If you need information first, use the search or schema tools to get it.
+- If you need information first, use the search, get-properties, or schema tools to get it.
 - After making changes, confirm what was actually done based on the tool result.
 - If a tool call fails, report the actual error to the user.
+
+FETCHING DATA EFFICIENTLY:
+- search and get-context return ONLY core properties (title, slug, type, _id, aposDocId) to save tokens.
+- Use get-properties to fetch specific fields you need by their dot-notation paths.
+- get-properties returns areas ONE LEVEL DEEP. Nested areas appear as "$callback:path.to.nested.area".
+- To get nested area content, call get-properties again with that path (without "$callback:" prefix).
+- NEVER include $callback strings in update requests - always fetch the actual data first using get-properties.
 
 MAKING UPDATES:
 - Make MINIMAL, surgical updates. Only include the specific fields you're changing.
@@ -481,11 +660,13 @@ MAKING UPDATES:
 
 UPDATING EXISTING WIDGETS:
 - To update a specific widget, use the update tool with an "@ reference" and the widget's _id.
-- Format: { "@widgetIdHere": { ...all widget properties... } }
-- Avoid using the @ syntax twice in a single request. Break that up over multiple requests.
-- You MUST include ALL properties of the widget, including _id, type, and metaType.
-- Example: { "@abc123": { "_id": "abc123", "type": "@apostrophecms/rich-text", "metaType": "widget", "content": "<p>New text</p>" } }
-- NEVER omit _id, type, or metaType - the widget will break without them.
+- You can combine @ notation with dot notation to update specific properties: { "@widgetId.content": "<p>New text</p>" }
+- This is much more efficient than replacing the entire widget.
+- Examples:
+  - Update just one property: { "@abc123.content": "<p>New text</p>" }
+  - Update a nested property: { "@columnWidgetId.desktop.colstart": 3 }
+  - Multiple updates in one call: { "@widget1.content": "...", "@widget2.desktop.colspan": 5 }
+- If you DO replace an entire widget, you MUST include _id, type, and metaType.
 
 ADDING NEW WIDGETS TO AN AREA:
 - Use the add-widget tool, NOT the update tool.
@@ -520,6 +701,65 @@ You have full permission to search, read schemas, and update content. Use your t
           system: systemPrompt,
           tools: self.tools,
           messages
+        });
+
+        // Send debug message with the input (excluding system prompt)
+        const messagesJson = JSON.stringify(messages, null, 2);
+        const charCount = messagesJson.length;
+
+        // Helper to find tool name by tool_use_id
+        const findToolName = (toolUseId) => {
+          for (const msg of messages) {
+            if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+              const toolUse = msg.content.find(c => c.type === 'tool_use' && c.id === toolUseId);
+              if (toolUse) return toolUse.name;
+            }
+          }
+          return 'unknown';
+        };
+
+        // Build summary from the LATEST message
+        const lastMessage = messages[messages.length - 1];
+        let context = '';
+        let preview = '';
+
+        if (lastMessage) {
+          if (lastMessage.role === 'user') {
+            // Check if it's a tool result
+            if (Array.isArray(lastMessage.content)) {
+              const toolResult = lastMessage.content.find(c => c.type === 'tool_result');
+              if (toolResult) {
+                const toolName = findToolName(toolResult.tool_use_id);
+                context = `result of ${toolName}`;
+                // Preview the tool result content
+                const resultStr = typeof toolResult.content === 'string'
+                  ? toolResult.content
+                  : JSON.stringify(toolResult.content);
+                preview = resultStr.substring(0, 100).replace(/\n/g, ' ');
+                if (resultStr.length > 100) preview += '...';
+              }
+            } else if (typeof lastMessage.content === 'string') {
+              context = 'user message';
+              preview = lastMessage.content.substring(0, 100);
+              if (lastMessage.content.length > 100) preview += '...';
+            }
+          } else if (lastMessage.role === 'assistant') {
+            // Check for tool_use in assistant message
+            if (Array.isArray(lastMessage.content)) {
+              const toolUse = lastMessage.content.find(c => c.type === 'tool_use');
+              if (toolUse) {
+                context = `after ${toolUse.name}`;
+                preview = JSON.stringify(toolUse.input || {}).substring(0, 80);
+                if (preview.length >= 80) preview += '...';
+              }
+            }
+          }
+        }
+
+        const summary = `Claude input: ${charCount.toLocaleString()} chars${context ? ` (${context})` : ''}`;
+        await self.addResponse(messageId, messagesJson, false, {
+          accordion: true,
+          accordionSummary: preview ? `${summary} — ${preview}` : summary
         });
 
         const makeRequest = async () => {
@@ -594,8 +834,16 @@ You have full permission to search, read schemas, and update content. Use your t
           return self.executeAddWidget(messageId, input.docId, input.areaId, input.widget, input.position);
         }
 
+        if (name === 'delete-widget') {
+          return self.executeDeleteWidget(messageId, input.docId, input.widgetId);
+        }
+
         if (name === 'get-context') {
           return self.executeGetContext(messageId);
+        }
+
+        if (name === 'get-properties') {
+          return self.executeGetProperties(messageId, input._id, input.fields);
         }
 
         return { error: `Unknown tool: ${name}` };
@@ -626,7 +874,7 @@ You have full permission to search, read schemas, and update content. Use your t
       async executeGetContext(messageId) {
         console.log('[chatbot] executeGetContext:', { messageId });
 
-        // Set pending action for browser to fetch context document
+        // Set pending action for browser to fetch context document (core properties only)
         await self.db().updateOne(
           { messageId },
           {
@@ -643,6 +891,35 @@ You have full permission to search, read schemas, and update content. Use your t
         console.log('[chatbot] Waiting for browser action result...');
         const result = await self.waitForActionResult(messageId);
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
+
+        // The browser now returns core properties only
+        return result;
+      },
+      async executeGetProperties(messageId, _id, fields) {
+        console.log('[chatbot] executeGetProperties:', { messageId, _id, fields });
+
+        // Fetch the full document from the database
+        const doc = await self.apos.doc.db.findOne({ _id });
+        if (!doc) {
+          return { error: `Document not found: ${_id}` };
+        }
+
+        // Extract requested fields
+        const result = {
+          _id: doc._id,
+          type: doc.type
+        };
+
+        for (const fieldPath of fields) {
+          const value = self.getValueAtPath(doc, fieldPath);
+          if (value !== undefined) {
+            // Process the value, replacing nested areas with $callback strings
+            result[fieldPath] = self.processForAI(value, fieldPath);
+          } else {
+            result[fieldPath] = null;
+          }
+        }
+
         return result;
       },
       async executeAddWidget(messageId, docId, areaId, widget, position) {
@@ -683,8 +960,51 @@ You have full permission to search, read schemas, and update content. Use your t
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
         return result;
       },
+      async executeDeleteWidget(messageId, docId, widgetId) {
+        console.log('[chatbot] executeDeleteWidget:', { messageId, docId, widgetId });
+
+        // Look up the document to get its type
+        const doc = await self.apos.doc.db.findOne({ _id: docId });
+        if (!doc) {
+          return { error: `Document not found: ${docId}` };
+        }
+
+        const pendingAction = {
+          type: 'delete-widget',
+          docId,
+          docType: doc.type,
+          widgetId
+        };
+
+        console.log('### DELETE WIDGET:', JSON.stringify(pendingAction, null, 2));
+
+        await self.db().updateOne(
+          { messageId },
+          {
+            $set: {
+              pendingAction,
+              actionResult: null
+            }
+          }
+        );
+
+        // Wait for browser to execute and return result
+        console.log('[chatbot] Waiting for browser action result...');
+        const result = await self.waitForActionResult(messageId);
+        console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
+        return result;
+      },
       async executeUpdate(messageId, _id, updates) {
         console.log('[chatbot] executeUpdate:', { messageId, _id, updates });
+
+        // Check for $callback strings in updates - these indicate unfetched data
+        const callbackStrings = self.findCallbackStrings(updates);
+        if (callbackStrings.length > 0) {
+          const paths = callbackStrings.map(c => `"${c.path}" contains "${c.value}"`).join(', ');
+          return {
+            error: `Cannot update with $callback placeholders. You must first fetch the actual data using get-properties with the callback path (without the "$callback:" prefix). Found: ${paths}`
+          };
+        }
 
         // Protected types that cannot be modified via AI
         const protectedTypes = [

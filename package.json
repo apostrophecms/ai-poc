@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node app",
     "dev": "APOS_DEV=1 nodemon --delay 1000ms -x \"nodemon app.js\"",
+    "test": "mocha --exit test/**/*.test.js",
     "staging-deploy": "echo \"ℹ️  Clearing module links and installed modules to deploy.\" && rm package-lock.json && rm -r node_modules && npm i && sc-deploy staging",
     "analyze-bundle": "APOS_BUNDLE_ANALYZER=1 node app @apostrophecms/asset:build"
   },
@@ -53,6 +54,7 @@
     "eslint": "^7.32.0",
     "eslint-config-apostrophe": "^3.4.0",
     "eslint-plugin-node": "^11.1.0",
+    "mocha": "^10.2.0",
     "nodemon": "^2.0.12"
   }
 }

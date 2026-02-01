@@ -1,4 +1,9 @@
 export default {
+  options: {
+    // Use compact text format for schemas (reduces tokens)
+    // Set to false to use full JSON format
+    compactSchema: true
+  },
   icons: {
     'robot-icon': 'Robot'
   },
@@ -319,7 +324,11 @@ Returns the full current document with all fields, or an error if there is no co
           }
           return {
             responses: newResponses,
-            pendingAction: entry.pendingAction
+            pendingAction: entry.pendingAction,
+            tokenUsage: {
+              inputTokens: entry.totalInputTokens || 0,
+              outputTokens: entry.totalOutputTokens || 0
+            }
           };
         },
         async history(req) {
@@ -544,6 +553,16 @@ You have full permission to search, read schemas, and update content. Use your t
 
         if (result.usage) {
           console.log(`[chatbot] Token usage: ${result.usage.input_tokens} input, ${result.usage.output_tokens} output`);
+          // Store token usage for tracking
+          await self.db().updateOne(
+            { messageId },
+            {
+              $inc: {
+                totalInputTokens: result.usage.input_tokens,
+                totalOutputTokens: result.usage.output_tokens
+              }
+            }
+          );
         }
 
         return result;
@@ -708,34 +727,67 @@ You have full permission to search, read schemas, and update content. Use your t
         console.log('[chatbot] Browser action result received:', JSON.stringify(result, null, 2));
         return result;
       },
-      // Prune schema to reduce token usage
-      pruneSchemaForAI(schema) {
+      // Convert schema to compact text format to reduce token usage
+      // Format: "fieldName: type* (details)" where * = required
+      schemaToCompact(schema, indent = 0) {
         if (!schema || !Array.isArray(schema)) {
-          return schema;
+          return '';
         }
-        return schema.map(field => {
-          const pruned = { ...field };
-          // Remove redundant/unnecessary properties
-          delete pruned.moduleName;
-          delete pruned.aposPath;
-          delete pruned._id;
-          delete pruned.group;
-          delete pruned.label;
-          delete pruned.fields;
-          // Prune labels from choices in select fields
-          if (pruned.choices && Array.isArray(pruned.choices)) {
-            pruned.choices = pruned.choices.map(choice => {
-              const prunedChoice = { ...choice };
-              delete prunedChoice.label;
-              return prunedChoice;
-            });
+        const pad = '  '.repeat(indent);
+        const lines = [];
+
+        for (const field of schema) {
+          const parts = [field.name, ': ', field.type];
+
+          // Mark required fields
+          if (field.required) {
+            parts.push('*');
           }
-          // Recursively prune nested schemas (e.g., in array or object fields)
-          if (pruned.schema) {
-            pruned.schema = self.pruneSchemaForAI(pruned.schema);
+
+          // Add type-specific details
+          const details = [];
+
+          // Relationship target type
+          if (field.withType) {
+            details.push(`-> ${field.withType}`);
           }
-          return pruned;
-        });
+
+          // Select/radio/checkboxes choices
+          if (field.choices && Array.isArray(field.choices)) {
+            const values = field.choices.map(c => c.value).join('|');
+            details.push(`[${values}]`);
+          }
+
+          // Area widgets
+          if (field.options?.widgets) {
+            const widgetTypes = Object.keys(field.options.widgets).join(', ');
+            details.push(`widgets: ${widgetTypes}`);
+          }
+
+          // Numeric constraints
+          if (field.min !== undefined) {
+            details.push(`min:${field.min}`);
+          }
+          if (field.max !== undefined) {
+            details.push(`max:${field.max}`);
+          }
+
+          // Array/object nested schema
+          if (field.schema && field.schema.length > 0) {
+            const nested = self.schemaToCompact(field.schema, indent + 1);
+            if (nested) {
+              details.push(`{\n${nested}\n${pad}}`);
+            }
+          }
+
+          if (details.length > 0) {
+            parts.push(' (', details.join(', '), ')');
+          }
+
+          lines.push(pad + parts.join(''));
+        }
+
+        return lines.join('\n');
       },
       executeDocSchema(typeName) {
         console.log('[chatbot] executeDocSchema:', { typeName });
@@ -755,10 +807,18 @@ You have full permission to search, read schemas, and update content. Use your t
 
         const docManager = self.apos.doc.managers[typeName];
         if (docManager && docManager.schema) {
-          return {
-            typeName,
-            schema: self.pruneSchemaForAI(docManager.schema)
-          };
+          if (self.options.compactSchema) {
+            return {
+              typeName,
+              schema: self.schemaToCompact(docManager.schema),
+              format: 'fieldName: type* (details) where * = required'
+            };
+          } else {
+            return {
+              typeName,
+              schema: docManager.schema
+            };
+          }
         }
 
         return { error: `Doc type not found: ${typeName}. Call doc-schema with no parameters to list available types.` };
@@ -777,16 +837,80 @@ You have full permission to search, read schemas, and update content. Use your t
         }
 
         // Try exact match first
-        let widgetManager = self.apos.area.widgetManagers[typeName];
+        const widgetManager = self.apos.area.widgetManagers[typeName];
 
-        if (widgetManager && widgetManager.schema) {
-          return {
-            typeName,
-            schema: self.pruneSchemaForAI(widgetManager.schema)
-          };
+        if (!widgetManager) {
+          return { error: `Widget type not found: ${typeName}. Call widget-schema with no parameters to list available types.` };
         }
 
-        return { error: `Widget type not found: ${typeName}. Call widget-schema with no parameters to list available types.` };
+        // Use getAiSchema() if available, otherwise use the full schema
+        const schema = (typeof widgetManager.getAiSchema === 'function')
+          ? widgetManager.getAiSchema()
+          : (widgetManager.schema || []);
+
+        // Get optional aiSkill hint
+        const aiSkill = widgetManager.options?.aiSkill;
+
+        if (self.options.compactSchema) {
+          // Built-in fields that all widgets have
+          const builtIn = '_id: string* (auto-generated), type: string* (widget type name), metaType: string* (always "widget")';
+
+          // Some widgets have special built-in content fields not in their schema
+          const specialFields = {
+            '@apostrophecms/rich-text': 'content: string* (HTML content)'
+          };
+
+          const schemaText = self.schemaToCompact(schema);
+          const special = specialFields[typeName] || '';
+
+          const parts = [builtIn];
+          if (special) {
+            parts.push(special);
+          }
+          if (schemaText) {
+            parts.push(schemaText);
+          }
+
+          const result = {
+            typeName,
+            schema: parts.join('\n'),
+            format: 'fieldName: type* (details) where * = required'
+          };
+          if (aiSkill) {
+            result.aiSkill = aiSkill;
+          }
+          return result;
+        } else {
+          // JSON format
+          // Add built-in fields to schema for completeness
+          const builtInFields = [
+            { name: '_id', type: 'string', required: true, help: 'Auto-generated unique ID' },
+            { name: 'type', type: 'string', required: true, help: 'Widget type name' },
+            { name: 'metaType', type: 'string', required: true, help: 'Always "widget"' }
+          ];
+
+          // Special fields for certain widget types
+          const specialFields = {
+            '@apostrophecms/rich-text': [
+              { name: 'content', type: 'string', required: true, help: 'HTML content' }
+            ]
+          };
+
+          const fullSchema = [
+            ...builtInFields,
+            ...(specialFields[typeName] || []),
+            ...schema
+          ];
+
+          const result = {
+            typeName,
+            schema: fullSchema
+          };
+          if (aiSkill) {
+            result.aiSkill = aiSkill;
+          }
+          return result;
+        }
       },
       async waitForActionResult(messageId, timeoutMs = 30000) {
         const startTime = Date.now();

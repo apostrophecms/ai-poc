@@ -258,7 +258,11 @@ export default {
       };
     },
     async addWidget(docId, docType, areaId, widget, position) {
-      const url = `/api/v1/${docType}/${docId}?aposMode=draft`;
+      const baseUrl = apos.modules[docType]?.action;
+      if (!baseUrl) {
+        throw new Error(`Cannot find REST API for type: ${docType}`);
+      }
+      const url = `${baseUrl}/${docId}?aposMode=draft`;
 
       // First GET the current document
       console.log('[chatbot-browser] Fetching document for add-widget:', url);
@@ -314,7 +318,11 @@ export default {
       };
     },
     async deleteWidget(docId, docType, widgetId) {
-      const url = `/api/v1/${docType}/${docId}?aposMode=draft`;
+      const baseUrl = apos.modules[docType]?.action;
+      if (!baseUrl) {
+        throw new Error(`Cannot find REST API for type: ${docType}`);
+      }
+      const url = `${baseUrl}/${docId}?aposMode=draft`;
 
       // First GET the current document
       console.log('[chatbot-browser] Fetching document for delete-widget:', url);
@@ -424,7 +432,11 @@ export default {
       return null;
     },
     async update(_id, docType, updates) {
-      const url = `/api/v1/${docType}/${_id}?aposMode=draft`;
+      const baseUrl = apos.modules[docType]?.action;
+      if (!baseUrl) {
+        throw new Error(`Cannot find REST API for type: ${docType}`);
+      }
+      const url = `${baseUrl}/${_id}?aposMode=draft`;
 
       // First GET the current document (draft mode)
       console.log('[chatbot-browser] Fetching document:', url);

@@ -82,7 +82,7 @@ export default {
           }
         }
         if (this.messages.length === 0) {
-          this.messages.push({ text: 'Chat with me', fromUser: false, final: true });
+          this.messages.push({ text: 'What\'s next?', fromUser: false, final: true });
         }
         this.scrollToBottom();
       } catch (error) {

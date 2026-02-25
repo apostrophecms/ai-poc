@@ -59,6 +59,8 @@ Now set the width of the star to 50% and center it.
 
 ## Frequently Asked Questions
 
+**"Why don't I see the changes it made? I can see it used tools to make changes."** Click "Edit" at upper right. The chatbot always works on the draft, so if you are viewing the published page you won't see anything right away.
+
 **"Why didn't it work?"** AI can be unpredictable, but please share your feedback with `tom@apostrophecms.com`. Please use the subject line "Chatbot PoC feedback."
 
 **"Why did the unit tests fail?"** See above. However, they should usually pass.

@@ -249,11 +249,12 @@ export default {
         this.addMessage('Error: Could not get response', false);
       }
     },
-    async pollForResponses(messageId) {
+    async pollForResponses(messageId, { retrying = false } = {}) {
       const pollInterval = 500;
       const maxAttempts = 1000;
       let attempts = 0;
       let lastIndex = 0;
+      let usedTools = false;
       while (attempts < maxAttempts) {
         attempts++;
         const response = await fetch(`/api/v1/chatbot/poll?messageId=${encodeURIComponent(messageId)}&lastIndex=${lastIndex}`);
@@ -264,6 +265,7 @@ export default {
 
         // Handle pending action from server
         if (data.pendingAction) {
+          usedTools = true;
           console.log('[chatbot-browser] Received pending action:', data.pendingAction);
           await this.executeAction(messageId, data.pendingAction);
         }
@@ -280,6 +282,17 @@ export default {
           }
         }
         if (receivedFinal) {
+          if (!usedTools && !retrying) {
+            const nudge = "You didn't use your tools. Did you do the work?";
+            this.addMessage(nudge, true);
+            const nudgeId = this.generateId();
+            await fetch('/api/v1/chatbot/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: nudge, messageId: nudgeId, chatId: this.chatId })
+            });
+            await this.pollForResponses(nudgeId, { retrying: true });
+          }
           return;
         }
         await this.delay(pollInterval);

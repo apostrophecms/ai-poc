@@ -79,7 +79,8 @@ export default {
     const storedVisible = localStorage.getItem('aposChatbotVisible');
     if (storedVisible === 'true') {
       this.visible = true;
-      this.loadHistory();
+      await this.loadHistory();
+      await this.sendContextUpdate();
     }
     apos.bus.$on('admin-menu-click', this.onAdminMenuClick);
   },
@@ -98,6 +99,27 @@ export default {
           this.showChatList = false;
         }
       }
+    },
+    async sendContextUpdate() {
+      const context = apos.adminBar.context;
+      if (!context || !context._id) {
+        return;
+      }
+      const lastContextId = localStorage.getItem('aposChatbotContextId');
+      if (context._id === lastContextId) {
+        return;
+      }
+      localStorage.setItem('aposChatbotContextId', context._id);
+      const label = context.title || context.slug || context._id;
+      const message = `I am now looking at: "${label}" (${context.type})`;
+      this.addMessage(message, true);
+      const messageId = this.generateId();
+      await fetch('/api/v1/chatbot/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, messageId, chatId: this.chatId })
+      });
+      await this.pollForResponses(messageId);
     },
     startNewChat() {
       this.chatId = this.generateId();

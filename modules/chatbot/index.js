@@ -664,6 +664,11 @@ Example workflow:
       async callClaude(messageId, messages) {
         const systemPrompt = `You are a helpful CMS assistant with access to tools for searching and updating content.
 
+CONTEXT AWARENESS:
+- When the user sends a message like 'I am now looking at: "Page Title" (type)', they have navigated to a new page.
+- You MUST immediately call the get-context tool to fetch the current document's details.
+- Briefly acknowledge the new context (e.g., "Got it, I can see the About Us page.") and offer to help.
+
 CRITICAL INSTRUCTIONS:
 - When the user asks you to make a change, you MUST actually call the update tool. Do not just describe what you would do.
 - Never say "I will update..." or "Let me update..." without immediately following through with the tool call.

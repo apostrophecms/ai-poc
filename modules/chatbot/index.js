@@ -392,6 +392,32 @@ Example workflow:
             }
           };
         },
+        async listChats(req) {
+          self.requireUser(req);
+          const chats = await self.db().aggregate([
+            { $match: { userId: req.user._id } },
+            { $sort: { createdAt: 1 } },
+            {
+              $group: {
+                _id: '$chatId',
+                preview: { $first: '$userMessage' },
+                createdAt: { $first: '$createdAt' },
+                lastActivity: { $last: '$createdAt' },
+                messageCount: { $sum: 1 }
+              }
+            },
+            { $sort: { lastActivity: -1 } }
+          ]).toArray();
+          return {
+            chats: chats.map(chat => ({
+              chatId: chat._id,
+              preview: (chat.preview || '').substring(0, 100),
+              createdAt: chat.createdAt,
+              lastActivity: chat.lastActivity,
+              messageCount: chat.messageCount
+            }))
+          };
+        },
         async history(req) {
           self.requireUser(req);
           const { chatId } = req.query;

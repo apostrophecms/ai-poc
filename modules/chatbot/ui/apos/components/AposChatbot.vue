@@ -1,6 +1,26 @@
 <template>
   <div v-if="visible" class="apos-chatbot">
-    <div class="apos-chatbot__messages" ref="messagesContainer">
+    <div class="apos-chatbot__header">
+      <button class="apos-chatbot__header-btn" @click="startNewChat">+ New Chat</button>
+      <button class="apos-chatbot__header-btn" :class="{ 'apos-chatbot__header-btn--active': showChatList }" @click="toggleChatList">History</button>
+    </div>
+    <div v-if="showChatList" class="apos-chatbot__chat-list">
+      <div v-if="chatListLoading" class="apos-chatbot__chat-list-loading">Loading...</div>
+      <div v-else-if="chatList.length === 0" class="apos-chatbot__chat-list-empty">No past chats</div>
+      <div
+        v-for="chat in chatList"
+        :key="chat.chatId"
+        class="apos-chatbot__chat-list-item"
+        :class="{ 'apos-chatbot__chat-list-item--active': chat.chatId === chatId }"
+        @click="switchToChat(chat.chatId)"
+      >
+        <div class="apos-chatbot__chat-list-preview">{{ chat.preview || '(empty)' }}</div>
+        <div class="apos-chatbot__chat-list-meta">
+          {{ formatDate(chat.lastActivity) }} &middot; {{ chat.messageCount }} msg{{ chat.messageCount !== 1 ? 's' : '' }}
+        </div>
+      </div>
+    </div>
+    <div v-else class="apos-chatbot__messages" ref="messagesContainer">
       <div
         v-for="(message, index) in messages"
         :key="index"
@@ -19,7 +39,7 @@
         <div v-else v-html="renderMarkdown(message.text)" class="apos-chatbot__markdown"></div>
       </div>
     </div>
-    <div class="apos-chatbot__input-container">
+    <div v-if="!showChatList" class="apos-chatbot__input-container">
       <textarea
         v-model="inputText"
         class="apos-chatbot__input"
@@ -40,11 +60,27 @@ export default {
       visible: false,
       messages: [],
       inputText: '',
-      chatId: null
+      chatId: null,
+      showChatList: false,
+      chatList: [],
+      chatListLoading: false
     };
   },
   async mounted() {
-    this.chatId = this.generateId();
+    // Restore chatId from localStorage or generate new
+    const storedChatId = localStorage.getItem('aposChatbotChatId');
+    if (storedChatId) {
+      this.chatId = storedChatId;
+    } else {
+      this.chatId = this.generateId();
+      localStorage.setItem('aposChatbotChatId', this.chatId);
+    }
+    // Restore visible state from localStorage
+    const storedVisible = localStorage.getItem('aposChatbotVisible');
+    if (storedVisible === 'true') {
+      this.visible = true;
+      this.loadHistory();
+    }
     apos.bus.$on('admin-menu-click', this.onAdminMenuClick);
   },
   beforeUnmount() {
@@ -54,10 +90,69 @@ export default {
     onAdminMenuClick(name) {
       if (name === 'chatbot:toggle') {
         this.visible = !this.visible;
+        localStorage.setItem('aposChatbotVisible', this.visible ? 'true' : 'false');
         if (this.visible && this.messages.length === 0) {
           this.loadHistory();
         }
+        if (!this.visible) {
+          this.showChatList = false;
+        }
       }
+    },
+    startNewChat() {
+      this.chatId = this.generateId();
+      localStorage.setItem('aposChatbotChatId', this.chatId);
+      this.messages = [{ text: 'What\'s next?', fromUser: false, final: true }];
+      this.showChatList = false;
+      this.scrollToBottom();
+    },
+    async toggleChatList() {
+      this.showChatList = !this.showChatList;
+      if (this.showChatList) {
+        this.chatListLoading = true;
+        try {
+          const response = await fetch('/api/v1/chatbot/list-chats');
+          if (response.ok) {
+            const data = await response.json();
+            this.chatList = data.chats;
+          }
+        } catch (error) {
+          console.error('[chatbot] Failed to load chat list:', error);
+        } finally {
+          this.chatListLoading = false;
+        }
+      }
+    },
+    async switchToChat(newChatId) {
+      this.chatId = newChatId;
+      localStorage.setItem('aposChatbotChatId', newChatId);
+      this.messages = [];
+      this.showChatList = false;
+      await this.loadHistory();
+    },
+    formatDate(dateStr) {
+      if (!dateStr) {
+        return '';
+      }
+      const date = new Date(dateStr);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffMins = Math.floor(diffMs / 60000);
+      if (diffMins < 1) {
+        return 'just now';
+      }
+      if (diffMins < 60) {
+        return `${diffMins}m ago`;
+      }
+      const diffHours = Math.floor(diffMins / 60);
+      if (diffHours < 24) {
+        return `${diffHours}h ago`;
+      }
+      const diffDays = Math.floor(diffHours / 24);
+      if (diffDays < 7) {
+        return `${diffDays}d ago`;
+      }
+      return date.toLocaleDateString();
     },
     async loadHistory() {
       try {
@@ -509,6 +604,83 @@ export default {
   border-radius: 8px;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
   z-index: 9999;
+}
+
+.apos-chatbot__header {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #ddd;
+  background-color: #fafafa;
+  border-radius: 8px 8px 0 0;
+  flex-shrink: 0;
+}
+
+.apos-chatbot__header-btn {
+  padding: 4px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  font-size: 0.85em;
+  color: #333;
+}
+
+.apos-chatbot__header-btn:hover {
+  background-color: #e8e8e8;
+}
+
+.apos-chatbot__header-btn--active {
+  background-color: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.apos-chatbot__header-btn--active:hover {
+  background-color: #0056b3;
+}
+
+.apos-chatbot__chat-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.apos-chatbot__chat-list-loading,
+.apos-chatbot__chat-list-empty {
+  padding: 16px;
+  text-align: center;
+  color: #888;
+  font-size: 0.9em;
+}
+
+.apos-chatbot__chat-list-item {
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.apos-chatbot__chat-list-item:hover {
+  background-color: #f0f0f0;
+}
+
+.apos-chatbot__chat-list-item--active {
+  background-color: #e3f2fd;
+}
+
+.apos-chatbot__chat-list-preview {
+  font-size: 0.9em;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.apos-chatbot__chat-list-meta {
+  font-size: 0.75em;
+  color: #888;
+  margin-top: 4px;
 }
 
 .apos-chatbot__messages {

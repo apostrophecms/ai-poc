@@ -32,7 +32,7 @@ This demo requires a paid Anthropic API account, and currently uses the Sonnet m
 
 1. Install dependencies with `npm install`.
 2. Add your first user with `node app @apostrophecms/user:add {MY_USERNAME} admin`.
-3. Set your `APOS_ANTHROPIC_API_KEY` environment variable. You will need a paid API account.
+3. **Set your `APOS_ANTHROPIC_API_KEY` environment variable.** You will need a paid Anthropic API account.
 
 ## Running the project
 
@@ -62,3 +62,5 @@ Now set the width of the star to 50% and center it.
 **"Why didn't it work?"** AI can be unpredictable, but please share your feedback with `tom@apostrophecms.com`. Please use the subject line "Chatbot PoC feedback."
 
 **"Why did the unit tests fail?"** See above. However, they should usually pass.
+
+**"Why doesn't it support OpenAI/Google?"** For PoC purposes we've gone with one model, but we plan a more general-purpose AI integration in ApostropheCMS core that will allow the developer to select the model.

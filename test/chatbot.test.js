@@ -176,12 +176,13 @@ describe('Chatbot Schema Format Comparison', function () {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
   }
 
-  async function sendChatMessage(message, contextDoc, chatId) {
+  async function sendChatMessage(message, contextDoc, chatId, { retrying = false } = {}) {
     const messageId = generateId();
     chatId = chatId || generateId();
 
     let lastKnownInputTokens = 0;
     let lastKnownOutputTokens = 0;
+    let usedTools = false;
 
     await apos.http.post('/api/v1/chatbot/chat', {
       body: { message, messageId, chatId },
@@ -214,6 +215,7 @@ describe('Chatbot Schema Format Comparison', function () {
       }
 
       if (pollResult.pendingAction) {
+        usedTools = true;
         const result = await executeAction(pollResult.pendingAction, contextDoc);
         await apos.http.post('/api/v1/chatbot/action-result', {
           body: { messageId, result },
@@ -225,6 +227,17 @@ describe('Chatbot Schema Format Comparison', function () {
         responses.push(resp);
         lastIndex++;
         if (resp.final) {
+          // Nudge the AI if it didn't use tools (just like the real frontend)
+          if (!usedTools && !retrying) {
+            console.log('[test] AI responded without using tools, nudging...');
+            const nudgeResult = await sendChatMessage(
+              "You didn't use your tools. Did you do the work?",
+              contextDoc,
+              chatId,
+              { retrying: true }
+            );
+            return nudgeResult;
+          }
           return { responses, finalText: resp.text };
         }
       }
@@ -422,6 +435,14 @@ describe('Chatbot Schema Format Comparison', function () {
   async function runAllScenarios(formatName) {
     const chatId = generateId();
     const contextDoc = { _id: testArticleId, type: 'article' };
+
+    // Send context update just like the real frontend does on page load
+    console.log(`\n  [${formatName}] Sending context update`);
+    await sendChatMessage(
+      `I am now looking at: "TEST-CHATBOT-ARTICLE-DO-NOT-USE" (article)`,
+      contextDoc,
+      chatId
+    );
 
     console.log(`\n  [${formatName}] Running scenario: cats paragraph`);
     await sendChatMessage(

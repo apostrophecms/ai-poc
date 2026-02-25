@@ -2,7 +2,7 @@
   <div v-if="visible" class="apos-chatbot">
     <div class="apos-chatbot__header">
       <button class="apos-chatbot__header-btn" @click="startNewChat">+ New Chat</button>
-      <button class="apos-chatbot__header-btn" :class="{ 'apos-chatbot__header-btn--active': showChatList }" @click="toggleChatList">History</button>
+      <button class="apos-chatbot__header-btn" :class="{ 'apos-chatbot__header-btn--active': showChatList }" @click="toggleChatList">Past Chats</button>
     </div>
     <div v-if="showChatList" class="apos-chatbot__chat-list">
       <div v-if="chatListLoading" class="apos-chatbot__chat-list-loading">Loading...</div>
@@ -33,7 +33,14 @@
       >
         <template v-if="message.fromUser">{{ message.text }}</template>
         <details v-else-if="message.accordion" class="apos-chatbot__accordion">
-          <summary class="apos-chatbot__accordion-summary">{{ message.accordionSummary }}</summary>
+          <summary class="apos-chatbot__accordion-summary">
+            <span class="apos-chatbot__accordion-summary-text">{{ message.accordionSummary }}</span>
+            <button
+              v-if="message.snapshotId"
+              class="apos-chatbot__revert-btn"
+              @click.stop.prevent="revertToSnapshot(message.snapshotId)"
+            >Revert</button>
+          </summary>
           <pre class="apos-chatbot__accordion-content">{{ message.text }}</pre>
         </details>
         <div v-else v-html="renderMarkdown(message.text)" class="apos-chatbot__markdown"></div>
@@ -195,6 +202,9 @@ export default {
               message.accordion = true;
               message.accordionSummary = resp.accordionSummary || 'Details';
             }
+            if (resp.snapshotId) {
+              message.snapshotId = resp.snapshotId;
+            }
             this.messages.push(message);
           }
         }
@@ -211,6 +221,9 @@ export default {
       if (options.accordion) {
         message.accordion = true;
         message.accordionSummary = options.accordionSummary || 'Details';
+      }
+      if (options.snapshotId) {
+        message.snapshotId = options.snapshotId;
       }
       this.messages.push(message);
       this.scrollToBottom();
@@ -274,7 +287,8 @@ export default {
         for (const resp of data.responses) {
           this.addMessage(resp.text, false, resp.final, {
             accordion: resp.accordion,
-            accordionSummary: resp.accordionSummary
+            accordionSummary: resp.accordionSummary,
+            snapshotId: resp.snapshotId
           });
           lastIndex++;
           if (resp.final) {
@@ -301,6 +315,7 @@ export default {
     },
     async executeAction(messageId, action) {
       console.log('[chatbot-browser] Executing action:', action.type);
+      const snapshotId = action.snapshotId || null;
       let result;
       try {
         if (action.type === 'search') {
@@ -322,13 +337,11 @@ export default {
       }
 
       console.log('[chatbot-browser] Sending result back to server:', result);
-      // Send result back to server
-      console.log(`${messageId} ${action.type} ${action.query} result length is:`, JSON.stringify(result).length);
 
       await fetch('/api/v1/chatbot/action-result', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageId, result })
+        body: JSON.stringify({ messageId, result, snapshotId })
       });
     },
     async getContext() {
@@ -423,7 +436,6 @@ export default {
         [`@${areaId}`]: area
       };
 
-      this.addPatchDebugMessage(url, patch);
       const patchResponse = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -444,7 +456,8 @@ export default {
 
       return {
         success: true,
-        widgetId: widget._id
+        widgetId: widget._id,
+        patchInfo: { url, body: patch }
       };
     },
     async deleteWidget(docId, docType, widgetId) {
@@ -473,7 +486,6 @@ export default {
         [`@${result.areaId}`]: result.area
       };
 
-      this.addPatchDebugMessage(url, patch);
       const patchResponse = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -494,7 +506,8 @@ export default {
 
       return {
         success: true,
-        deletedWidgetId: widgetId
+        deletedWidgetId: widgetId,
+        patchInfo: { url, body: patch }
       };
     },
     // Find a widget by _id and remove it from its parent area
@@ -578,7 +591,6 @@ export default {
       console.log('[chatbot-browser] Current document:', currentDoc);
 
       // PATCH with updates (draft mode)
-      this.addPatchDebugMessage(url, updates);
       const patchResponse = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -598,25 +610,42 @@ export default {
       });
 
       return {
-        success: true
+        success: true,
+        patchInfo: { url, body: updates }
       };
     },
     delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     },
-    addPatchDebugMessage(url, body) {
-      const bodyJson = JSON.stringify(body, null, 2);
-      const charCount = bodyJson.length;
-      // Extract first ~100 chars for preview
-      let preview = bodyJson.substring(0, 100).replace(/\n/g, ' ');
-      if (bodyJson.length > 100) {
-        preview += '...';
-      }
-      const summary = `PATCH ${url.split('?')[0]} (${charCount.toLocaleString()} chars) — ${preview}`;
-      this.addMessage(bodyJson, false, false, {
-        accordion: true,
-        accordionSummary: summary
+    async revertToSnapshot(snapshotId) {
+      const confirmed = await apos.confirm({
+        heading: 'Revert this change?',
+        description: 'This will revert this document to its state before this change, undoing this and every change after it, whether made by AI or not.',
+        localize: false
       });
+      if (!confirmed) {
+        return;
+      }
+      try {
+        const response = await fetch('/api/v1/chatbot/revert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ snapshotId })
+        });
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Revert failed: ${response.status} ${errorText}`);
+        }
+        const data = await response.json();
+        apos.bus.$emit('content-changed', { action: 'update' });
+        // Reload chat history to reflect deleted messages
+        this.messages = [];
+        await this.loadHistory();
+        const label = data.userMessage || 'that change';
+        this.addMessage(`Reverted to before "${label}"`, false, true);
+      } catch (error) {
+        this.addMessage(`Error reverting: ${error.message}`, false, true);
+      }
     },
     renderMarkdown(text) {
       return marked(text || '');
@@ -809,12 +838,15 @@ export default {
 
 .apos-chatbot__message--accordion {
   max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   background-color: #e8e8e8;
   font-size: 0.85em;
 }
 
 .apos-chatbot__accordion {
   width: 100%;
+  overflow: hidden;
 }
 
 .apos-chatbot__accordion-summary {
@@ -822,14 +854,39 @@ export default {
   font-family: monospace;
   font-size: 0.9em;
   color: #555;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.apos-chatbot__accordion-summary-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 4px 0;
+  flex: 1;
+  min-width: 0;
 }
 
 .apos-chatbot__accordion-summary:hover {
   color: #000;
+}
+
+.apos-chatbot__revert-btn {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  font-size: 0.8em;
+  border: 1px solid #cc4444;
+  border-radius: 3px;
+  background: white;
+  color: #cc4444;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.apos-chatbot__revert-btn:hover {
+  background: #cc4444;
+  color: white;
 }
 
 .apos-chatbot__accordion-content {

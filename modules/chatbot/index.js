@@ -283,12 +283,62 @@ Example workflow:
           self.processMessage(messageId, chatId, message, req.user._id);
           return { status: 'processing' };
         },
+        async revert(req) {
+          self.requireUser(req);
+          const { snapshotId } = req.body;
+          if (!snapshotId) {
+            throw self.apos.error('invalid', 'snapshotId is required');
+          }
+          const snapshot = await self.snapshotDb().findOne({ _id: snapshotId });
+          if (!snapshot) {
+            throw self.apos.error('notfound', 'Snapshot not found');
+          }
+          if (self.apos.page.isPage(snapshot.doc)) {
+            await self.apos.page.update(req, snapshot.doc);
+          } else {
+            await self.apos.doc.getManager(snapshot.docType).update(req, snapshot.doc);
+          }
+          // Find the message entry that triggered this mutation
+          const entry = await self.db().findOne({ messageId: snapshot.messageId });
+          let userMessage = '';
+          if (entry) {
+            userMessage = entry.userMessage || '';
+            // Delete this entry and all subsequent entries in the same chat
+            await self.db().deleteMany({
+              chatId: entry.chatId,
+              userId: req.user._id,
+              createdAt: { $gte: entry.createdAt }
+            });
+          }
+          return {
+            success: true,
+            userMessage: userMessage.substring(0, 80)
+          };
+        },
         async actionResult(req) {
           self.requireUser(req);
-          const { messageId, result } = req.body;
+          const { messageId, result, snapshotId } = req.body;
           console.log('[chatbot] actionResult received:', { messageId, result: JSON.stringify(result, null, 2) });
           if (!messageId) {
             throw self.apos.error('invalid', 'messageId is required');
+          }
+          // If the result includes PATCH info, store a debug accordion response with snapshotId
+          if (result && result.patchInfo) {
+            const { url, body } = result.patchInfo;
+            const bodyJson = JSON.stringify(body, null, 2);
+            const charCount = bodyJson.length;
+            let preview = bodyJson.substring(0, 100).replace(/\n/g, ' ');
+            if (bodyJson.length > 100) {
+              preview += '...';
+            }
+            const summary = `PATCH ${url.split('?')[0]} (${charCount.toLocaleString()} chars) — ${preview}`;
+            await self.addResponse(messageId, bodyJson, false, {
+              accordion: true,
+              accordionSummary: summary,
+              snapshotId: snapshotId || null
+            });
+            // Remove patchInfo from result before storing (not needed for Claude)
+            delete result.patchInfo;
           }
           await self.db().updateOne(
             { messageId, userId: req.user._id },
@@ -438,6 +488,56 @@ Example workflow:
       db() {
         return self.apos.db.collection('aposChatbotMessages');
       },
+      snapshotDb() {
+        return self.apos.db.collection('aposChatbotSnapshots');
+      },
+      async snapshotDocument(messageId, doc) {
+        const snapshotId = self.apos.util.generateId();
+        const pruned = self.pruneRelationships(doc);
+        await self.snapshotDb().insertOne({
+          _id: snapshotId,
+          messageId,
+          docId: pruned._id,
+          docType: pruned.type,
+          doc: pruned,
+          createdAt: new Date()
+        });
+        return snapshotId;
+      },
+      // Recursively prune relationship arrays (properties starting with _
+      // that are arrays) to only keep _id, aposDocId, type, and _fields
+      pruneRelationships(obj) {
+        if (Array.isArray(obj)) {
+          return obj.map(item => self.pruneRelationships(item));
+        }
+        if (obj && typeof obj === 'object') {
+          const result = {};
+          for (const [key, value] of Object.entries(obj)) {
+            if (key.startsWith('_') && Array.isArray(value)) {
+              result[key] = value.map(entry => {
+                if (!entry || typeof entry !== 'object') {
+                  return entry;
+                }
+                const kept = {
+                  _id: entry._id,
+                  aposDocId: entry.aposDocId,
+                  type: entry.type
+                };
+                if (entry._fields) {
+                  kept._fields = entry._fields;
+                }
+                return kept;
+              });
+            } else if (value && typeof value === 'object') {
+              result[key] = self.pruneRelationships(value);
+            } else {
+              result[key] = value;
+            }
+          }
+          return result;
+        }
+        return obj;
+      },
       requireUser(req) {
         if (!req.user) {
           throw self.apos.error('forbidden', 'Login required');
@@ -568,6 +668,9 @@ Example workflow:
         if (options.accordion) {
           response.accordion = true;
           response.accordionSummary = options.accordionSummary || '';
+        }
+        if (options.snapshotId) {
+          response.snapshotId = options.snapshotId;
         }
         await self.db().updateOne(
           { messageId },
@@ -964,6 +1067,8 @@ You have full permission to search, read schemas, and update content. Use your t
           return { error: `Document not found: ${docId}` };
         }
 
+        const snapshotId = await self.snapshotDocument(messageId, doc);
+
         // Set pending action for browser to execute
 
         const pendingAction = {
@@ -972,7 +1077,8 @@ You have full permission to search, read schemas, and update content. Use your t
           docType: doc.type,
           areaId,
           widget,
-          position: position ?? 'end'
+          position: position ?? 'end',
+          snapshotId
         };
 
         console.log('### ADD WIDGET:', JSON.stringify(pendingAction, null, 2));
@@ -1002,11 +1108,14 @@ You have full permission to search, read schemas, and update content. Use your t
           return { error: `Document not found: ${docId}` };
         }
 
+        const snapshotId = await self.snapshotDocument(messageId, doc);
+
         const pendingAction = {
           type: 'delete-widget',
           docId,
           docType: doc.type,
-          widgetId
+          widgetId,
+          snapshotId
         };
 
         console.log('### DELETE WIDGET:', JSON.stringify(pendingAction, null, 2));
@@ -1058,6 +1167,8 @@ You have full permission to search, read schemas, and update content. Use your t
 
         console.log('### UPDATES:', JSON.stringify(updates, null, 2));
 
+        const snapshotId = await self.snapshotDocument(messageId, doc);
+
         // Set pending action for browser to execute via REST API
         await self.db().updateOne(
           { messageId },
@@ -1067,7 +1178,8 @@ You have full permission to search, read schemas, and update content. Use your t
                 type: 'update',
                 _id,
                 docType: doc.type,
-                updates
+                updates,
+                snapshotId
               },
               actionResult: null
             }

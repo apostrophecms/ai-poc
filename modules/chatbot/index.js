@@ -834,6 +834,9 @@ You have full permission to search, read schemas, and update content. Use your t
         const body = JSON.stringify({
           model: 'claude-sonnet-4-5-20250929',
           max_tokens: 8192,
+          cache_control: {
+            type: 'ephemeral'
+          },
           system: systemPrompt,
           tools: self.tools,
           messages

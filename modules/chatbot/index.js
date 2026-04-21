@@ -315,6 +315,18 @@ Example workflow:
             userMessage: userMessage.substring(0, 80)
           };
         },
+        async cancel(req) {
+          self.requireUser(req);
+          const { messageId } = req.body;
+          if (!messageId) {
+            throw self.apos.error('invalid', 'messageId is required');
+          }
+          await self.db().updateOne(
+            { messageId, userId: req.user._id },
+            { $set: { cancelled: true } }
+          );
+          return { status: 'ok' };
+        },
         async actionResult(req) {
           self.requireUser(req);
           const { messageId, result, snapshotId } = req.body;
@@ -701,6 +713,10 @@ Example workflow:
 
         return messages;
       },
+      async isCancelled(messageId) {
+        const entry = await self.db().findOne({ messageId });
+        return !!(entry && entry.cancelled);
+      },
       async processMessage(messageId, chatId, message, userId) {
         console.log('[chatbot] processMessage started:', { messageId, chatId, message });
         try {
@@ -714,6 +730,11 @@ Example workflow:
 
           // Handle tool use loop
           while (response.stop_reason === 'tool_use') {
+            if (await self.isCancelled(messageId)) {
+              console.log('[chatbot] Cancelled before tool execution');
+              await self.addResponse(messageId, '_Stopped._', true);
+              return;
+            }
             console.log('[chatbot] Tool use detected');
             const toolUseBlocks = response.content.filter(block => block.type === 'tool_use');
             if (toolUseBlocks.length === 0) {
@@ -742,6 +763,12 @@ Example workflow:
               });
             }
 
+            if (await self.isCancelled(messageId)) {
+              console.log('[chatbot] Cancelled after tool execution');
+              await self.addResponse(messageId, '_Stopped._', true);
+              return;
+            }
+
             // Continue conversation with all tool results
             messages.push({ role: 'assistant', content: response.content });
             messages.push({
@@ -752,6 +779,11 @@ Example workflow:
             console.log('[chatbot] Calling Claude again with', toolResults.length, 'tool result(s)');
             response = await self.callClaude(messageId, messages);
             console.log('[chatbot] Claude response after tool:', JSON.stringify(response, null, 2));
+          }
+
+          if (await self.isCancelled(messageId)) {
+            await self.addResponse(messageId, '_Stopped._', true);
+            return;
           }
 
           // Extract final text response
@@ -1386,6 +1418,9 @@ You have full permission to search, read schemas, and update content. Use your t
 
         while (Date.now() - startTime < timeoutMs) {
           const entry = await self.db().findOne({ messageId });
+          if (entry && entry.cancelled) {
+            return { error: 'Cancelled by user' };
+          }
           if (entry && entry.actionResult !== null) {
             return entry.actionResult;
           }

@@ -51,8 +51,14 @@
         v-model="inputText"
         class="apos-chatbot__input"
         placeholder="Type a message..."
+        :disabled="processing"
         @keydown.enter.prevent="sendMessage"
       />
+      <button
+        v-if="processing"
+        class="apos-chatbot__stop-btn"
+        @click="stopMessage"
+      >Stop</button>
     </div>
   </div>
 </template>
@@ -70,7 +76,10 @@ export default {
       chatId: null,
       showChatList: false,
       chatList: [],
-      chatListLoading: false
+      chatListLoading: false,
+      processing: false,
+      stopRequested: false,
+      currentMessageId: null
     };
   },
   async mounted() {
@@ -121,12 +130,20 @@ export default {
       const message = `I am now looking at: "${label}" (${context.type})`;
       this.addMessage(message, true);
       const messageId = this.generateId();
-      await fetch('/api/v1/chatbot/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, messageId, chatId: this.chatId })
-      });
-      await this.pollForResponses(messageId);
+      this.processing = true;
+      this.stopRequested = false;
+      this.currentMessageId = messageId;
+      try {
+        await fetch('/api/v1/chatbot/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, messageId, chatId: this.chatId })
+        });
+        await this.pollForResponses(messageId);
+      } finally {
+        this.processing = false;
+        this.currentMessageId = null;
+      }
     },
     startNewChat() {
       this.chatId = this.generateId();
@@ -244,9 +261,15 @@ export default {
       if (!text) {
         return;
       }
+      if (this.processing) {
+        return;
+      }
       this.addMessage(text, true);
       this.inputText = '';
       const messageId = this.generateId();
+      this.processing = true;
+      this.stopRequested = false;
+      this.currentMessageId = messageId;
       try {
         // Start processing
         await fetch('/api/v1/chatbot/chat', {
@@ -260,6 +283,25 @@ export default {
         await this.pollForResponses(messageId);
       } catch (error) {
         this.addMessage('Error: Could not get response', false);
+      } finally {
+        this.processing = false;
+        this.currentMessageId = null;
+      }
+    },
+    async stopMessage() {
+      if (!this.currentMessageId) {
+        return;
+      }
+      this.stopRequested = true;
+      const idToCancel = this.currentMessageId;
+      try {
+        await fetch('/api/v1/chatbot/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId: idToCancel })
+        });
+      } catch (error) {
+        console.error('[chatbot] Error sending cancel:', error);
       }
     },
     async pollForResponses(messageId, { retrying = false } = {}) {
@@ -269,6 +311,9 @@ export default {
       let lastIndex = 0;
       let usedTools = false;
       while (attempts < maxAttempts) {
+        if (this.stopRequested) {
+          return;
+        }
         attempts++;
         const response = await fetch(`/api/v1/chatbot/poll?messageId=${encodeURIComponent(messageId)}&lastIndex=${lastIndex}`);
         if (!response.ok) {
@@ -276,8 +321,8 @@ export default {
         }
         const data = await response.json();
 
-        // Handle pending action from server
-        if (data.pendingAction) {
+        // Skip action execution if user has stopped the conversation
+        if (data.pendingAction && !this.stopRequested) {
           usedTools = true;
           console.log('[chatbot-browser] Received pending action:', data.pendingAction);
           await this.executeAction(messageId, data.pendingAction);
@@ -296,10 +341,11 @@ export default {
           }
         }
         if (receivedFinal) {
-          if (!usedTools && !retrying) {
+          if (!this.stopRequested && !usedTools && !retrying) {
             const nudge = "You didn't use your tools. Did you do the work?";
             this.addMessage(nudge, true);
             const nudgeId = this.generateId();
+            this.currentMessageId = nudgeId;
             await fetch('/api/v1/chatbot/chat', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -792,6 +838,30 @@ export default {
   padding: 8px;
   font-family: sans-serif;
   box-sizing: border-box;
+}
+
+.apos-chatbot__input:disabled {
+  background-color: #f5f5f5;
+  color: #888;
+  cursor: not-allowed;
+}
+
+.apos-chatbot__stop-btn {
+  display: block;
+  margin-top: 6px;
+  margin-left: auto;
+  padding: 4px 14px;
+  border: 1px solid #cc4444;
+  border-radius: 4px;
+  background: white;
+  color: #cc4444;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.apos-chatbot__stop-btn:hover {
+  background: #cc4444;
+  color: white;
 }
 
 .apos-chatbot__markdown {

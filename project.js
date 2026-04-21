@@ -3,7 +3,7 @@ import apostrophe from 'apostrophe';
 export default function createApos(options = {}) {
   const baseConfig = {
     root: import.meta,
-    shortName: 'public-demo',
+    shortName: 'ai-poc',
     baseUrl: 'http://localhost:3000',
 
     modules: {

@@ -126,12 +126,15 @@ IMPORTANT:
             },
             {
               name: 'generate-id',
-              description: `Generate a unique _id for a new widget or other object.
+              description: `Generate a unique _id for a new widget OR area.
 
 IMPORTANT: You MUST use this tool whenever you need to create a new _id.
-- Call this tool BEFORE constructing any new widget
-- Never make up or guess _id values
-- Each new widget needs its own unique _id from this tool`,
+- Call this tool BEFORE constructing any new widget.
+- ALSO call it for every nested area (metaType: "area") in a widget you're creating.
+  Areas need _ids so follow-up add-widget calls can target them by _id.
+  Example: a layout widget has a "columns" area - that area needs its own _id.
+- Never make up or guess _id values.
+- Each new widget AND each new area needs its own unique _id from this tool.`,
               input_schema: {
                 type: 'object',
                 properties: {},
@@ -147,9 +150,17 @@ This safely inserts the widget while preserving all existing content.
 Works with nested areas (e.g., areas inside layout widget columns) by finding the area by its _id.
 
 IMPORTANT:
-- Use generate-id first to get the _id for the new widget
-- The widget must include _id, type, and metaType: "widget"
-- position can be a number (0 = first) or "end" to append`,
+- Use generate-id first to get the _id for the new widget.
+- Also generate-id for any nested areas on the widget (e.g., a layout widget's "columns" area).
+  Each nested area must include _id, metaType: "area", and items (usually []).
+- The widget must include _id, type, and metaType: "widget".
+- position can be a number (0 = first) or "end" to append.
+- For widgets containing areas (e.g., layouts), BUILD ITERATIVELY: add the outer widget with its
+  areas EMPTY first, then issue follow-up add-widget calls to populate each area. Do NOT try to
+  emit the whole nested tree in one call - deep JSON with similar siblings (like three columns)
+  is error-prone.
+- The response includes an "areaIds" array listing every nested area _id in what you just added,
+  keyed by dot-notation path. Use these to target follow-up add-widget calls.`,
               input_schema: {
                 type: 'object',
                 properties: {
@@ -840,19 +851,45 @@ ADDING NEW WIDGETS TO AN AREA:
 - Use the add-widget tool, NOT the update tool.
 - add-widget safely inserts a new widget without disturbing existing widgets.
 
+BUILD ITERATIVELY FOR WIDGETS WITH NESTED AREAS:
+- If the widget's schema contains an area field (e.g., a layout widget's "columns" area, or a
+  layout-column's "content" area), DO NOT construct the entire nested tree in a single add-widget
+  call. Deep JSON with multiple similar siblings (e.g., three columns) is error-prone - closing
+  braces easily misalign and later siblings end up nested inside earlier ones.
+- Instead:
+  1. First add-widget call: the outer widget with its nested areas EMPTY (metaType: "area",
+     items: []). Generate an _id for the widget AND for each of its nested areas.
+  2. The add-widget response includes an "areaIds" array: each entry is { path, _id } for a
+     nested area. Use these _ids to target follow-up calls.
+  3. For each child (e.g., each column), call add-widget again, passing the parent area's _id
+     as areaId. If that child itself contains an area, repeat the pattern - add it with an empty
+     inner area first, then fill that area in subsequent calls.
+- Example for a 3-column pricing comparison:
+  a) add-widget: layout widget, with columns area empty. areaIds returns the columns area's _id.
+  b) add-widget x3 targeting the columns area: each layout-column widget, each with its content
+     area empty. Each response returns that column's content area _id.
+  c) add-widget for each column's content area: the actual price-card (or other) widget.
+- This round-trip cost is intentional. A few extra tool calls are far cheaper than misplacing a
+  brace in a deep tree.
+
 REQUIRED STEPS BEFORE ADDING A WIDGET:
 1. FIRST call widget-schema to get the exact schema for the widget type you want to add.
-2. If adding nested widgets (e.g., widgets inside a layout's columns), check widget-schema for EACH nested widget type too.
-3. THEN call generate-id for the main widget AND for each nested widget - every widget needs its own unique _id.
+2. If you're including a child widget in THIS call (not iteratively), also call widget-schema for
+   each child widget type.
+3. Call generate-id for the widget AND for every nested area the widget will contain. Areas need
+   _ids so follow-up add-widget calls can target them.
 4. Construct the widget using ONLY properties from the schema - NEVER guess or invent properties.
-5. The widget must include _id, type, and metaType: "widget" plus schema-defined fields.
+5. The widget must include _id, type, and metaType: "widget". Each nested area must include _id,
+   metaType: "area", and items (usually [] at this stage - fill iteratively per above).
 - NEVER use update to add widgets - it risks destroying existing content.
 - NEVER skip schema checks - you MUST know the exact field names before constructing ANY widget.
 
 CREATING NEW WIDGETS OR OTHER OBJECTS:
-- When creating a new widget or anything else that requires its own _id, you MUST call the generate-id tool first.
+- When creating a new widget, area, or anything else that requires its own _id, you MUST call
+  the generate-id tool first.
 - NEVER make up or guess _id values - always use generate-id.
-- Each new widget needs: _id (from generate-id), metaType: "widget", and type (the widget type name).
+- Each new widget needs: _id (from generate-id), metaType: "widget", and type.
+- Each new area needs: _id (from generate-id), metaType: "area", and items.
 
 RELATIONSHIP FIELDS:
 - To update a relationship field, pass an array of related documents to the relationship field name (e.g., _images, not imageIds).

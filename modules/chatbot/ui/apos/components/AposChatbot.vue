@@ -494,6 +494,11 @@ export default {
       const updatedDoc = await patchResponse.json();
       console.log('[chatbot-browser] Widget added successfully');
 
+      // Collect _ids of every nested area in the widget we just added, so the AI can
+      // target them in follow-up add-widget calls without re-fetching the document.
+      const addedWidget = this.findWidgetById(updatedDoc, widget._id);
+      const areaIds = addedWidget ? this.collectAreaIds(addedWidget) : [];
+
       // Emit event so Apostrophe UI reflects the change
       apos.bus.$emit('content-changed', {
         doc: updatedDoc,
@@ -503,8 +508,54 @@ export default {
       return {
         success: true,
         widgetId: widget._id,
+        areaIds,
         patchInfo: { url, body: patch }
       };
+    },
+    findWidgetById(obj, widgetId) {
+      if (!obj || typeof obj !== 'object') {
+        return null;
+      }
+      if (obj._id === widgetId && obj.metaType === 'widget') {
+        return obj;
+      }
+      for (const key of Object.keys(obj)) {
+        const value = obj[key];
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            const found = this.findWidgetById(item, widgetId);
+            if (found) {
+              return found;
+            }
+          }
+        } else if (value && typeof value === 'object') {
+          const found = this.findWidgetById(value, widgetId);
+          if (found) {
+            return found;
+          }
+        }
+      }
+      return null;
+    },
+    collectAreaIds(obj, path = '') {
+      const ids = [];
+      if (!obj || typeof obj !== 'object') {
+        return ids;
+      }
+      if (path && obj.metaType === 'area' && obj._id) {
+        ids.push({ path, _id: obj._id });
+      }
+      for (const [key, value] of Object.entries(obj)) {
+        const newPath = path ? `${path}.${key}` : key;
+        if (Array.isArray(value)) {
+          value.forEach((item, i) => {
+            ids.push(...this.collectAreaIds(item, `${newPath}.${i}`));
+          });
+        } else if (value && typeof value === 'object') {
+          ids.push(...this.collectAreaIds(value, newPath));
+        }
+      }
+      return ids;
     },
     async deleteWidget(docId, docType, widgetId) {
       const baseUrl = apos.modules[docType]?.action;
